@@ -11,6 +11,7 @@
 #include "essential.h"
 // Effect section
 #include "jdsp/jdsp_header.h"
+#include "peq_loudness.h"
 typedef struct
 {
 	unsigned long long initializeForFirst;
@@ -29,6 +30,9 @@ typedef struct
 	int numTime2Send, samplesInc, stringIndex;
 	int16_t impChannels;
 	int32_t impulseLengthActual, convolverNeedRefresh;
+	// PEQ and loudness (root version extensions)
+	peq_cascade_t peq;
+	loudness_t loudness;
 } EffectDSPMain;
 typedef struct
 {
@@ -49,6 +53,8 @@ void EffectDSPMainConstructor(EffectDSPMain *dspmain)
 	dspmain->samplesInc = 0;
 	dspmain->stringIndex = 0;
 	JamesDSPInit(&dspmain->jdsp, 128, 48000.0f);
+	peq_cascade_init(&dspmain->peq);
+	loudness_init(&dspmain->loudness);
 }
 void EffectDSPMainDestructor(EffectDSPMain *dspmain)
 {
@@ -748,6 +754,70 @@ int32_t EffectDSPMainCommand(EffectDSPMain *dspmain, uint32_t cmdCode, uint32_t 
 				return 0;
 			}
 		}
+		/* PEQ enable/disable (short) */
+		if (cep->psize == 4 && cep->vsize == 2)
+		{
+			int32_t cmd = ((int32_t *)cep)[3];
+			if (cmd == 1214)
+			{
+				int16_t peqEnabled = ((int16_t *)cep)[8];
+				peq_cascade_set_enabled(&dspmain->peq, peqEnabled ? true : false);
+				*replyData = 0;
+				return 0;
+			}
+			else if (cmd == 1215)
+			{
+				int16_t loudnessEnabled = ((int16_t *)cep)[8];
+				loudness_set_enabled(&dspmain->loudness, loudnessEnabled ? true : false);
+				*replyData = 0;
+				return 0;
+			}
+		}
+		/* PEQ config: variable size, 2 header floats + N bands * 5 floats each.
+		 * Accept up to PEQ_MAX_BANDS (64) = 322 floats = 1288 bytes.
+		 * Minimum: 2 floats (header only) = 8 bytes. */
+		if (cep->psize == 4 && cep->vsize >= 8 && cep->vsize <= 1288 && (cep->vsize % 4) == 0)
+		{
+			int32_t cmd = ((int32_t *)cep)[3];
+			if (cmd == 1300)
+			{
+				float *fdata = &((float*)cep)[4];
+				int numFloats = cep->vsize / 4;
+				double sr = (double)fdata[0];
+				if (sr <= 0.0) sr = (double)dspmain->jdsp.fs;
+				peq_cascade_configure(&dspmain->peq, sr, fdata, numFloats);
+				*replyData = 0;
+				return 0;
+			}
+		}
+		/* Loudness config: 5 floats = 20 bytes */
+		if (cep->psize == 4 && cep->vsize == 20)
+		{
+			int32_t cmd = ((int32_t *)cep)[3];
+			if (cmd == 1301)
+			{
+				float *fdata = &((float*)cep)[4];
+				double sr = (double)fdata[0];
+				if (sr <= 0.0) sr = (double)dspmain->jdsp.fs;
+				loudness_configure(&dspmain->loudness, sr,
+					(double)fdata[1], (double)fdata[2],
+					(double)fdata[3], (double)fdata[4]);
+				*replyData = 0;
+				return 0;
+			}
+		}
+		/* Loudness volume update: 1 float = 4 bytes */
+		if (cep->psize == 4 && cep->vsize == 4)
+		{
+			int32_t cmd = ((int32_t *)cep)[3];
+			if (cmd == 1302)
+			{
+				float *fdata = &((float*)cep)[4];
+				loudness_set_volume(&dspmain->loudness, (double)fdata[0]);
+				*replyData = 0;
+				return 0;
+			}
+		}
 		return -1;
 	}
     switch (cmdCode)
@@ -807,6 +877,54 @@ int32_t EffectDSPMainProcess(EffectDSPMain *dspmain, audio_buffer_t *in, audio_b
 	case 4:
 		dspmain->jdsp.processInt8_24Multiplexd(&dspmain->jdsp, in->s32, out->s32, actualFrameCount);
 		break;
+	}
+	/* Apply PEQ cascade and loudness correction (root version extensions).
+	 * Convert output to float interleaved, process, convert back. */
+	if (dspmain->peq.enabled || dspmain->loudness.enabled)
+	{
+		/* Use a stack buffer; blockSizeMax bounds the frame count */
+		size_t totalSamples = actualFrameCount * 2; /* stereo interleaved */
+		if (totalSamples <= 8192) /* safety limit */
+		{
+			float tmpBuf[8192];
+			switch (dspmain->formatFloatModeInt32Mode)
+			{
+			case 0: /* int16 */
+				for (size_t i = 0; i < totalSamples; i++)
+					tmpBuf[i] = (float)out->s16[i] / 32768.0f;
+				peq_cascade_process_interleaved(&dspmain->peq, tmpBuf, actualFrameCount);
+				loudness_process_interleaved(&dspmain->loudness, tmpBuf, actualFrameCount);
+				for (size_t i = 0; i < totalSamples; i++)
+				{
+					float v = tmpBuf[i] * 32768.0f;
+					if (v > 32767.0f) v = 32767.0f;
+					if (v < -32768.0f) v = -32768.0f;
+					out->s16[i] = (int16_t)v;
+				}
+				break;
+			case 1: /* float */
+				peq_cascade_process_interleaved(&dspmain->peq, out->f32, actualFrameCount);
+				loudness_process_interleaved(&dspmain->loudness, out->f32, actualFrameCount);
+				break;
+			case 2: /* int32 */
+			case 4: /* int8_24 */
+				for (size_t i = 0; i < totalSamples; i++)
+					tmpBuf[i] = (float)out->s32[i] / 8388608.0f;
+				peq_cascade_process_interleaved(&dspmain->peq, tmpBuf, actualFrameCount);
+				loudness_process_interleaved(&dspmain->loudness, tmpBuf, actualFrameCount);
+				for (size_t i = 0; i < totalSamples; i++)
+				{
+					float v = tmpBuf[i] * 8388608.0f;
+					if (v > 8388607.0f) v = 8388607.0f;
+					if (v < -8388608.0f) v = -8388608.0f;
+					out->s32[i] = (int32_t)v;
+				}
+				break;
+			case 3: /* int24 packed — rare, skip PEQ/loudness */
+			default:
+				break;
+			}
+		}
 	}
 	return dspmain->mEnable ? 0 : -ENODATA;
 }
