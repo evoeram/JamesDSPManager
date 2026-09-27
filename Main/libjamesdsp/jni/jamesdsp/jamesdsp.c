@@ -160,7 +160,38 @@ int32_t EffectDSPMainCommand(EffectDSPMain *dspmain, uint32_t cmdCode, uint32_t 
 			return 0;
 		}
 		// Set sample rate
+		double oldFs = (double)dspmain->jdsp.fs;
 		JamesDSPSetSampleRate(&dspmain->jdsp, dspmain->mSamplingRate, 0);
+		double newFs = (double)dspmain->jdsp.fs;
+		/* Если частота дискретизации изменилась, перенастраиваем PEQ и loudness
+		 * на новую fs. Коэффициенты biquad зависят от частоты дискретизации,
+		 * и без перенастройки частоты фильтров сдвигаются (например, на HiBy R4
+		 * при переключении deep_buffer 44100 ↔ primary 48000).
+		 * peq_cascade_configure и loudness_configure принимуют sample rate
+		 * и пересчитывают все коэффициенты.
+		 * Сохраняем текущие параметры и переотправляем с новым sample rate.
+		 * Это безопасно: если PEQ/loudness не были настроены, bandCount=0 и
+		 * neutral=true, и функции просто обновят sampleRate без эффекта. */
+		if (oldFs != newFs)
+		{
+			/* Обновляем sampleRate в PEQ и пересчитываем biquad-коэффициенты.
+			 * К сожалению, оригинальные данные параметра (fdata) не сохраняются,
+			 * поэтому мы переинициализируем только sampleRate и помечаем
+			 * коэффициенты как требующие перенастройки.
+			 * Полное исправление: Kotlin-слой получит ACTION_SAMPLE_RATE_UPDATED
+			 * и вызовет syncWithPreferences, который переотправит параметры
+			 * с корректным sample rate. Здесь мы только обновляем sampleRate
+			 * в структурах, чтобы новый fs использовался при следующем configure. */
+			dspmain->peq.sampleRate = newFs;
+			dspmain->loudness.sampleRate = newFs;
+			/* Помечаем loudness для перерасчёта коэффициентов */
+			dspmain->loudness.coeffsDirty = true;
+			dspmain->loudness.lastComputedVolume = 1e30;
+			/* PEQ требует полного reconfigure через Kotlin (syncWithPreferences).
+			 * Сбрасываем bandCount, чтобы избежать работы со старыми
+			 * коэффициентами до переотправки параметров. */
+			dspmain->peq.bandCount = 0;
+		}
 		*replyData = 0;
 		return 0;
 	}
@@ -780,31 +811,38 @@ int32_t EffectDSPMainCommand(EffectDSPMain *dspmain, uint32_t cmdCode, uint32_t 
 		{
 			int32_t cmd = ((int32_t *)cep)[3];
 			if (cmd == 1300)
-			{
-				float *fdata = &((float*)cep)[4];
-				int numFloats = cep->vsize / 4;
-				double sr = (double)fdata[0];
-				if (sr <= 0.0) sr = (double)dspmain->jdsp.fs;
-				peq_cascade_configure(&dspmain->peq, sr, fdata, numFloats);
-				*replyData = 0;
-				return 0;
-			}
+				{
+					float *fdata = &((float*)cep)[4];
+					int numFloats = cep->vsize / 4;
+					/* Всегда используем реальную частоту дискретизации AudioFlinger
+					 * (dspmain->jdsp.fs), а не значение из Kotlin.
+					 * Kotlin может передать устаревшее значение (например 48000),
+					 * если syncWithPreferences вызвана до EFFECT_CMD_SET_CONFIG.
+					 * На устройствах вроде HiBy R4, где deep_buffer = 44100,
+					 * это приводит к сдвигу частот PEQ на 44100/48000 ≈ 1/8 октавы.
+					 * fdata[0] (sample rate из Kotlin) игнорируется намеренно. */
+					double sr = (double)dspmain->jdsp.fs;
+					peq_cascade_configure(&dspmain->peq, sr, fdata, numFloats);
+					*replyData = 0;
+					return 0;
+				}
 		}
 		/* Loudness config: 5 floats = 20 bytes */
 		if (cep->psize == 4 && cep->vsize == 20)
 		{
 			int32_t cmd = ((int32_t *)cep)[3];
 			if (cmd == 1301)
-			{
-				float *fdata = &((float*)cep)[4];
-				double sr = (double)fdata[0];
-				if (sr <= 0.0) sr = (double)dspmain->jdsp.fs;
-				loudness_configure(&dspmain->loudness, sr,
-					(double)fdata[1], (double)fdata[2],
-					(double)fdata[3], (double)fdata[4]);
-				*replyData = 0;
-				return 0;
-			}
+				{
+					float *fdata = &((float*)cep)[4];
+					/* Всегда используем реальную частоту AudioFlinger (dspmain->jdsp.fs).
+					 * См. комментарий в cmd == 1300 выше. fdata[0] игнорируется. */
+					double sr = (double)dspmain->jdsp.fs;
+					loudness_configure(&dspmain->loudness, sr,
+						(double)fdata[1], (double)fdata[2],
+						(double)fdata[3], (double)fdata[4]);
+					*replyData = 0;
+					return 0;
+				}
 		}
 		/* Loudness volume update: 1 float = 4 bytes */
 		if (cep->psize == 4 && cep->vsize == 4)
