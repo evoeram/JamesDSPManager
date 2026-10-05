@@ -142,6 +142,69 @@ typedef struct
 	SixBandsCrossover subband[2];
 	float pregain, postgain;
 } VacuumTube;
+// Harmonic Expander (Chebyshev waveshaper, harmonics 2–10)
+typedef struct
+{
+	float b0, b1, b2, a1, a2, x1, x2, y1, y2;
+} HRBiquadHP;
+typedef struct
+{
+	float prevX, prevY;
+} HRDCBlocker;
+typedef struct
+{
+	float harmonicGain[9];    // per-harmonic gain for harmonics 2–10 (0–100 %)
+	float mix;                // wet/dry mix (0.0–1.0)
+	float crossoverFreq;      // high-pass crossover for band extraction
+	HRBiquadHP bandHP[2];
+	HRDCBlocker dc[2];
+} HarmonicExpander;
+// Sub-Harmonic Expander (sub-harmonic synthesiser, 10 sub-harmonics)
+typedef struct
+{
+	float b0, b1, b2, a1, a2, x1, x2, y1, y2;
+} SHBiquadStage;
+typedef struct
+{
+	SHBiquadStage stage1, stage2;
+} SHBiquadLP4;
+typedef struct
+{
+	float subHarmonicGain[9];  // per-subharmonic gain for f/2–f/10 (0–100 %)
+	float mix;                 // wet/dry mix (0.0–1.0)
+	float crossoverFreq;       // low-pass crossover for band extraction
+	SHBiquadLP4 bandLP[2];     // band extraction low-pass (L/R)
+	SHBiquadLP4 outLP[2];      // output low-pass (L/R)
+	// Frequency tracking state
+	float phase[2];            // phase accumulator (L/R)
+	int lastSign[2];           // last sign for zero-crossing detection
+	int samplesSinceLastCrossing[2];
+	float detectedFreq[2];     // detected fundamental frequency (L/R)
+	// Envelope follower
+	float env[2];              // envelope (L/R)
+	float envAttackCoef;       // attack coefficient
+	float envReleaseCoef;      // release coefficient
+} SubHarmonicExpander;
+// NOS R2R Simulator
+typedef struct
+{
+	double srcRate;
+	double targetRate;
+	double ratio;
+	int bitDepth;
+	double resistorTolerance;
+	int deviationGrowth;
+	int harmony;        // 0=Random, 1=Even, 2=Odd
+	long serialNumber;
+	double jitterAmount;
+	double harmonicsAmount;
+	int invertPhase;
+	double fracAccum;
+	float lastSampleL, lastSampleR;
+	double bitDeviation[24];
+	double bitDeviationR[24];
+	int deviationValid;
+} NosR2R;
 typedef struct
 {
 	float inputs[1024];
@@ -523,6 +586,15 @@ typedef struct dspsys
 	// Vacuum tube
 	int tubeEnabled;
 	VacuumTube tube;
+	// Harmonic Expander
+	int harmonicExpanderEnabled;
+	HarmonicExpander harmonicExpander;
+	// Sub-Harmonic Expander
+	int subHarmonicExpanderEnabled;
+	SubHarmonicExpander subHarmonicExpander;
+	// NOS R2R Simulator
+	int nosR2REnabled;
+	NosR2R nosR2R;
 	// Crossfeed
 	int crossfeedEnabled, crossfeedForceRefresh;
 	Crossfeed advXF;
@@ -623,6 +695,26 @@ extern void VacuumTubeEnable(JamesDSPLib *jdsp);
 extern void VacuumTubeDisable(JamesDSPLib *jdsp);
 extern void VacuumTubeSetGain(JamesDSPLib *jdsp, double dbGain);
 extern void VacuumTubeProcess(JamesDSPLib *jdsp, size_t n);
+// Harmonic Expander
+extern void HarmonicExpanderConstructor(JamesDSPLib *jdsp);
+extern void HarmonicExpanderEnable(JamesDSPLib *jdsp);
+extern void HarmonicExpanderDisable(JamesDSPLib *jdsp);
+extern void HarmonicExpanderSetParam(JamesDSPLib *jdsp, float harmonicGains[9], float crossoverFreq, float mix);
+extern void HarmonicExpanderProcess(JamesDSPLib *jdsp, size_t n);
+// Sub-Harmonic Expander
+extern void SubHarmonicExpanderConstructor(JamesDSPLib *jdsp);
+extern void SubHarmonicExpanderEnable(JamesDSPLib *jdsp);
+extern void SubHarmonicExpanderDisable(JamesDSPLib *jdsp);
+extern void SubHarmonicExpanderSetParam(JamesDSPLib *jdsp, float subHarmonicGains[9], float crossoverFreq, float mix);
+extern void SubHarmonicExpanderProcess(JamesDSPLib *jdsp, size_t n);
+// NOS R2R Simulator
+extern void NosR2REnable(JamesDSPLib *jdsp);
+extern void NosR2RDisable(JamesDSPLib *jdsp);
+extern void NosR2RSetParam(JamesDSPLib *jdsp, double targetRate, int bitDepth,
+                           double resistorTolerance, int deviationGrowth,
+                           int harmony, long serialNumber,
+                           double jitterAmount, double harmonicsAmount, int invertPhase);
+extern void NosR2RProcess(JamesDSPLib *jdsp, size_t n);
 // Live programmable effect
 extern const char* checkErrorCode(int errCode);
 extern void LiveProgConstructor(JamesDSPLib *jdsp);

@@ -785,7 +785,7 @@ int32_t EffectDSPMainCommand(EffectDSPMain *dspmain, uint32_t cmdCode, uint32_t 
 				return 0;
 			}
 		}
-		/* PEQ enable/disable (short) */
+		/* PEQ / loudness / NOS / expander enable/disable (short) */
 		if (cep->psize == 4 && cep->vsize == 2)
 		{
 			int32_t cmd = ((int32_t *)cep)[3];
@@ -800,6 +800,89 @@ int32_t EffectDSPMainCommand(EffectDSPMain *dspmain, uint32_t cmdCode, uint32_t 
 			{
 				int16_t loudnessEnabled = ((int16_t *)cep)[8];
 				loudness_set_enabled(&dspmain->loudness, loudnessEnabled ? true : false);
+				*replyData = 0;
+				return 0;
+			}
+			else if (cmd == 1216)
+			{
+				int16_t enabled = ((int16_t *)cep)[8];
+				if (enabled)
+					HarmonicExpanderEnable(&dspmain->jdsp);
+				else
+					HarmonicExpanderDisable(&dspmain->jdsp);
+				*replyData = 0;
+				return 0;
+			}
+			else if (cmd == 1217)
+			{
+				int16_t enabled = ((int16_t *)cep)[8];
+				if (enabled)
+					SubHarmonicExpanderEnable(&dspmain->jdsp);
+				else
+					SubHarmonicExpanderDisable(&dspmain->jdsp);
+				*replyData = 0;
+				return 0;
+			}
+			else if (cmd == 1218)
+			{
+				int16_t enabled = ((int16_t *)cep)[8];
+				if (enabled)
+					NosR2REnable(&dspmain->jdsp);
+				else
+					NosR2RDisable(&dspmain->jdsp);
+				*replyData = 0;
+				return 0;
+			}
+		}
+		/* Harmonic Expander config: 11 floats = 44 bytes
+		 * [0..8] = harmonic gains (harmonics 2–10), [9] = crossoverFreq, [10] = mix(0–100) */
+		if (cep->psize == 4 && cep->vsize == 44)
+		{
+			int32_t cmd = ((int32_t *)cep)[3];
+			if (cmd == 1305)
+			{
+				float *f = &((float*)cep)[4];
+				float gains[9];
+				for (int i = 0; i < 9; i++)
+					gains[i] = f[i];
+				HarmonicExpanderSetParam(&dspmain->jdsp, gains, f[9], f[10]);
+				*replyData = 0;
+				return 0;
+			}
+			else if (cmd == 1306)
+			{
+				float *f = &((float*)cep)[4];
+				float gains[9];
+				for (int i = 0; i < 9; i++)
+					gains[i] = f[i];
+				SubHarmonicExpanderSetParam(&dspmain->jdsp, gains, f[9], f[10]);
+				*replyData = 0;
+				return 0;
+			}
+		}
+		/* NOS R2R config: 11 floats = 44 bytes
+		 * [0] = targetRate, [1] = bitDepth, [2] = resistorTolerance,
+		 * [3] = deviationGrowth, [4] = harmony, [5] = serialLo,
+		 * [6] = serialHi, [7] = jitterAmount, [8] = harmonicsAmount,
+		 * [9] = invertPhase, [10] = unused */
+		if (cep->psize == 4 && cep->vsize == 44)
+		{
+			int32_t cmd = ((int32_t *)cep)[3];
+			if (cmd == 1307)
+			{
+				float *f = &((float*)cep)[4];
+				double targetRate = (double)f[0];
+				int bitDepth = (int)f[1];
+				double resistorTolerance = (double)f[2];
+				int deviationGrowth = (int)f[3];
+				int harmony = (int)f[4];
+				long serialNumber = ((long)(int32_t)f[5]) | ((long long)(int32_t)f[6] << 32);
+				double jitterAmount = (double)f[7];
+				double harmonicsAmount = (double)f[8];
+				int invertPhase = (int)f[9];
+				NosR2RSetParam(&dspmain->jdsp, targetRate, bitDepth, resistorTolerance,
+					deviationGrowth, harmony, serialNumber, jitterAmount,
+					harmonicsAmount, invertPhase);
 				*replyData = 0;
 				return 0;
 			}
@@ -839,7 +922,7 @@ int32_t EffectDSPMainCommand(EffectDSPMain *dspmain, uint32_t cmdCode, uint32_t 
 					double sr = (double)dspmain->jdsp.fs;
 					loudness_configure(&dspmain->loudness, sr,
 						(double)fdata[1], (double)fdata[2],
-						(double)fdata[3], (double)fdata[4]);
+						(double)fdata[3], (double)fdata[4], 0);
 					*replyData = 0;
 					return 0;
 				}

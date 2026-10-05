@@ -312,6 +312,15 @@ void JamesDSPProcess(JamesDSPLib *jdsp, size_t n)
 	// Analog modelling
 	if (jdsp->tubeEnabled)
 		VacuumTubeProcess(jdsp, n);
+	// NOS R2R Simulator
+	if (jdsp->nosR2REnabled)
+		NosR2RProcess(jdsp, n);
+	// Harmonic Expander
+	if (jdsp->harmonicExpanderEnabled)
+		HarmonicExpanderProcess(jdsp, n);
+	// Sub-Harmonic Expander
+	if (jdsp->subHarmonicExpanderEnabled)
+		SubHarmonicExpanderProcess(jdsp, n);
 	// Input / Compressor
 	if (jdsp->compEnabled)
 		CompressorProcess(jdsp, n);
@@ -371,6 +380,15 @@ void JamesDSPProcessCheckBenchmarkReady(JamesDSPLib *jdsp, size_t n)
 	// Analog modelling
 	if (jdsp->tubeEnabled)
 		VacuumTubeProcess(jdsp, n);
+	// NOS R2R Simulator
+	if (jdsp->nosR2REnabled)
+		NosR2RProcess(jdsp, n);
+	// Harmonic Expander
+	if (jdsp->harmonicExpanderEnabled)
+		HarmonicExpanderProcess(jdsp, n);
+	// Sub-Harmonic Expander
+	if (jdsp->subHarmonicExpanderEnabled)
+		SubHarmonicExpanderProcess(jdsp, n);
 	// Input / Compressor
 	if (jdsp->compEnabled)
 		CompressorProcess(jdsp, n);
@@ -1116,6 +1134,11 @@ void JamesDSPInit(JamesDSPLib *jdsp, int n, float sample_rate)
 	StereoEnhancementConstructor(jdsp);
 	StereoEnhancementDisable(jdsp);
 	VacuumTubeDisable(jdsp);
+	HarmonicExpanderConstructor(jdsp);
+	HarmonicExpanderDisable(jdsp);
+	SubHarmonicExpanderConstructor(jdsp);
+	SubHarmonicExpanderDisable(jdsp);
+	NosR2RDisable(jdsp);
 	LiveProgDisable(jdsp);
 	DDCConstructor(jdsp);
 	DDCDisable(jdsp);
