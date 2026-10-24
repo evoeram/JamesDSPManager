@@ -20,6 +20,9 @@ LOCAL_SRC_FILES := \
 	jdsp/Effects/multimodalEQ.c \
 	jdsp/Effects/dynamic.c \
 	jdsp/Effects/dbb.c \
+	jdsp/Effects/harmonicExpander.c \
+	jdsp/Effects/nosR2R.c \
+	jdsp/Effects/subHarmonicExpander.c \
 	jdsp/Effects/convolver1D.c \
 	jdsp/Effects/crossfeed.c \
 	jdsp/Effects/bs2b.c \
@@ -95,8 +98,9 @@ ifeq ($(TARGET_ARCH_ABI), armeabi-v7a)
 LOCAL_CPPFLAGS += -Wall -Wextra -ffunction-sections -fdata-sections -Ofast -march=armv7-a -mfpu=neon -ftree-vectorize -fvisibility=hidden -DJAMESDSP_REFERENCE_IMPL #-DDEBUG -g
 LOCAL_CFLAGS += -Wall -Wextra -ffunction-sections -fdata-sections -Ofast -march=armv7-a -mfpu=neon -ftree-vectorize -fvisibility=hidden -DJAMESDSP_REFERENCE_IMPL #-DDEBUG -g
 else ifeq ($(TARGET_ARCH_ABI), arm64-v8a)
-LOCAL_CPPFLAGS += -Wall -Wextra -ffunction-sections -fdata-sections -Ofast -march=armv8-a -mfpu=neon -ftree-vectorize -fvisibility=hidden -DJAMESDSP_REFERENCE_IMPL #-DDEBUG -g
-LOCAL_CFLAGS += -Wall -Wextra -ffunction-sections -fdata-sections -Ofast -march=armv8-a -mfpu=neon -ftree-vectorize -fvisibility=hidden -DJAMESDSP_REFERENCE_IMPL #-DDEBUG -g
+# -mfpu=neon is invalid for aarch64 (NEON is mandatory in armv8-a)
+LOCAL_CPPFLAGS += -Wall -Wextra -ffunction-sections -fdata-sections -Ofast -march=armv8-a -ftree-vectorize -fvisibility=hidden -DJAMESDSP_REFERENCE_IMPL #-DDEBUG -g
+LOCAL_CFLAGS += -Wall -Wextra -ffunction-sections -fdata-sections -Ofast -march=armv8-a -ftree-vectorize -fvisibility=hidden -DJAMESDSP_REFERENCE_IMPL #-DDEBUG -g
 else ifeq ($(TARGET_ARCH_ABI), x86)
 LOCAL_CPPFLAGS += -ffunction-sections -fdata-sections -Ofast -ftree-vectorize -fvisibility=hidden -DJAMESDSP_REFERENCE_IMPL #-DDEBUG -g
 LOCAL_CFLAGS += -ffunction-sections -fdata-sections -Ofast -ftree-vectorize -fvisibility=hidden -DJAMESDSP_REFERENCE_IMPL #-DDEBUG -g

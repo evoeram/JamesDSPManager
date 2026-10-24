@@ -10,6 +10,11 @@
 #include "Effects/eel2/eelCommon.h"
 #include "generalDSP/ArbFIRGen.h"
 #define MAX_BENCHMARK (10)
+/* Forward declaration: struct dspsys is first referenced by callback fields
+ * (e.g. Crossfeed.process) before its definition below. Without this the tag
+ * gets scoped to the enclosing declaration and function pointer types become
+ * incompatible under clang 16+ (-Wincompatible-function-pointer-types). */
+struct dspsys;
 // Misc
 extern double mapVal(double x, double in_min, double in_max, double out_min, double out_max);
 extern double mag2dB(double lin);

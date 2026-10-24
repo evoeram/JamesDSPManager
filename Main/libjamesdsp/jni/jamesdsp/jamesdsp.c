@@ -8,6 +8,7 @@
 #endif
 #include <string.h>
 #include <math.h>
+#include <unistd.h>
 #include "essential.h"
 // Effect section
 #include "jdsp/jdsp_header.h"

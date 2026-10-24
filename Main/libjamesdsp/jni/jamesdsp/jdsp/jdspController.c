@@ -4,6 +4,7 @@
 #include <math.h>
 #include <time.h>
 #include <float.h>
+#include <unistd.h>
 #include "Effects/eel2/dr_flac.h"
 #include "Effects/eel2/ns-eel.h"
 #include "jdsp_header.h"
