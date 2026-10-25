@@ -37,6 +37,7 @@ extern double randXorshift(uint64_t s[2]);
 // Misc end
 typedef struct
 {
+	int enabled;
 	float threshold;
 	float relCoef;
 	float envOverThreshold;
@@ -667,6 +668,7 @@ extern void JamesDSPSetSampleRate(JamesDSPLib *jdsp, float new_sample_rate, int 
 extern int selectConvPartitions(JamesDSPLib *jdsp, unsigned int impulseLengthActual, unsigned int *seg2Len);
 // Limiter
 extern void JLimiterSetCoefficients(JamesDSPLib *jdsp, double thresholddB, double msRelease);
+extern void JLimiterSetEnable(JamesDSPLib *jdsp, int enable);
 extern void JLimiterInit(JamesDSPLib *jdsp);
 // Compressor
 extern void CompressorConstructor(JamesDSPLib *jdsp);

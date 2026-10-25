@@ -13,9 +13,18 @@ void JLimiterSetCoefficients(JamesDSPLib *jdsp, double thresholddB, double msRel
 	jdsp->limiter.relCoef = (float)exp(-1000.0 / (msRelease * round((double)jdsp->fs)));
 	jdsp->limiter.threshold = (float)pow(10.0, thresholddB / 20.0);
 }
+void JLimiterSetEnable(JamesDSPLib *jdsp, int enable)
+{
+	jdsp->limiter.enabled = enable;
+	if (enable)
+		// Discard stale envelope state so re-enabling does not apply a leftover gain reduction
+		jdsp->limiter.envOverThreshold = 0.0f;
+}
 void JLimiterInit(JamesDSPLib *jdsp)
 {
 	jdsp->limiter.envOverThreshold = 0.0f;
+	// Safety limiter is part of the output stage; keep it enabled by default
+	jdsp->limiter.enabled = 1;
 }
 #ifndef M_PI
 #define M_PI 3.14159265358979323846

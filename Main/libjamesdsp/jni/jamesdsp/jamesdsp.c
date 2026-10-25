@@ -642,6 +642,34 @@ int32_t EffectDSPMainCommand(EffectDSPMain *dspmain, uint32_t cmdCode, uint32_t 
 				return 0;
 			}
 		}
+		if (cep->psize == 4 && cep->vsize == 16)
+		{
+			int32_t cmd = ((int32_t *)cep)[3];
+			if (cmd == 1500)
+			{
+				// Extended output control payload: [enable, threshold, release, postgain]
+				float limEnable = ((float*)cep)[4];
+				double limThreshold = (double)((float*)cep)[5];
+				double limRelease = (double)((float*)cep)[6];
+				double postgain = (double)((float*)cep)[7];
+				if (limThreshold > -0.09)
+					limThreshold = -0.09;
+				if (limRelease < 0.15)
+					limRelease = 0.15;
+				if (postgain > 15.0)
+					postgain = 15.0;
+				if (postgain < -15.0)
+					postgain = -15.0;
+				JLimiterSetEnable(&dspmain->jdsp, limEnable > 0.5f);
+				JLimiterSetCoefficients(&dspmain->jdsp, limThreshold, limRelease);
+				JamesDSPSetPostGain(&dspmain->jdsp, postgain);
+#ifdef DEBUG
+				LOGE("limEnable: %f, limThreshold: %f, limRelease: %f, postgain: %f", limEnable, limThreshold, limRelease, postgain);
+#endif
+				*replyData = 0;
+				return 0;
+			}
+		}
 		if (cep->psize == 4 && cep->vsize == 12)
 		{
 			int32_t cmd = ((int32_t *)cep)[3];
