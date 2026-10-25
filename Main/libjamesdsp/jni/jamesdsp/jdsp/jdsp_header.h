@@ -617,7 +617,8 @@ typedef struct dspsys
 	arbitraryMagnitude arbMag;
 	// Output limiter
 	float postGain;
-	int limiterEnabled;
+	float smoothVolumeGain;
+	int outputControlEnabled;
 	JLimiter limiter;
 	size_t blockSize, blockSizeMax, pw2BlockMemSize;
 	float *tmpBuffer[6];
@@ -663,7 +664,8 @@ extern void jdsp_unlock(JamesDSPLib *jdsp);
 extern void JamesDSPFree(JamesDSPLib *jdsp);
 extern void JamesDSPInit(JamesDSPLib *jdsp, int blockSizeMax, float sample_rate);
 extern void JamesDSPSetPostGain(JamesDSPLib *jdsp, double pGaindB);
-extern void JamesDSPSetLimiterEnabled(JamesDSPLib *jdsp, int enable);
+extern void JamesDSPSetOutputControlEnabled(JamesDSPLib *jdsp, int enable);
+extern void JamesDSPSetSmoothVolumeGain(JamesDSPLib *jdsp, double gainDb);
 extern int JamesDSPGetMutexStatus(JamesDSPLib *jdsp);
 extern void JamesDSPSetSampleRate(JamesDSPLib *jdsp, float new_sample_rate, int forceRefresh);
 extern int selectConvPartitions(JamesDSPLib *jdsp, unsigned int impulseLengthActual, unsigned int *seg2Len);

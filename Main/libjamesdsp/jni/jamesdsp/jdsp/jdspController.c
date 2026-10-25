@@ -355,13 +355,16 @@ void JamesDSPProcess(JamesDSPLib *jdsp, size_t n)
 	// Reverb
 	if (jdsp->reverbEnabled)
 		ReverbProcess(jdsp, n);
-	// Output. Post gain stays unconditional: root-mode smooth volume drives it
-	// independently of the user-facing output control switch.
+	// Output. Smooth volume stays unconditional (root-mode volume control);
+	// the output control switch gates the user-facing post gain and limiter.
+	float outGain = jdsp->smoothVolumeGain;
+	if (jdsp->outputControlEnabled)
+		outGain *= jdsp->postGain;
 	for (size_t i = 0; i < n; i++)
 	{
-		float xL = jdsp->tmpBuffer[0][i] * jdsp->postGain;
-		float xR = jdsp->tmpBuffer[1][i] * jdsp->postGain;
-		if (jdsp->limiterEnabled)
+		float xL = jdsp->tmpBuffer[0][i] * outGain;
+		float xR = jdsp->tmpBuffer[1][i] * outGain;
+		if (jdsp->outputControlEnabled)
 		{
 			float rect1 = fabsf(xL);
 			float rect2 = fabsf(xR);
@@ -430,13 +433,16 @@ void JamesDSPProcessCheckBenchmarkReady(JamesDSPLib *jdsp, size_t n)
 	// Reverb
 	if (jdsp->reverbEnabled)
 		ReverbProcess(jdsp, n);
-	// Output. Post gain stays unconditional: root-mode smooth volume drives it
-	// independently of the user-facing output control switch.
+	// Output. Smooth volume stays unconditional (root-mode volume control);
+	// the output control switch gates the user-facing post gain and limiter.
+	float outGain = jdsp->smoothVolumeGain;
+	if (jdsp->outputControlEnabled)
+		outGain *= jdsp->postGain;
 	for (size_t i = 0; i < n; i++)
 	{
-		float xL = jdsp->tmpBuffer[0][i] * jdsp->postGain;
-		float xR = jdsp->tmpBuffer[1][i] * jdsp->postGain;
-		if (jdsp->limiterEnabled)
+		float xL = jdsp->tmpBuffer[0][i] * outGain;
+		float xR = jdsp->tmpBuffer[1][i] * outGain;
+		if (jdsp->outputControlEnabled)
 		{
 			float rect1 = fabsf(xL);
 			float rect2 = fabsf(xR);
@@ -1139,7 +1145,8 @@ void JamesDSPInit(JamesDSPLib *jdsp, int n, float sample_rate)
 	JLimiterInit(jdsp);
 	JLimiterSetCoefficients(jdsp, -(double)(FLT_EPSILON * 10.0f), 100.0);
 	jdsp->postGain = 1.0f;
-	jdsp->limiterEnabled = 1;
+	jdsp->smoothVolumeGain = 1.0f;
+	jdsp->outputControlEnabled = 1;
 	// Init effect
 	LiveProgConstructor(jdsp);
 	CompressorConstructor(jdsp);
@@ -1193,11 +1200,19 @@ void JamesDSPSetPostGain(JamesDSPLib *jdsp, double pGaindB)
 		pGaindB = 15.0f;
 	jdsp->postGain = db2magf(pGaindB);
 }
-void JamesDSPSetLimiterEnabled(JamesDSPLib *jdsp, int enable)
+void JamesDSPSetOutputControlEnabled(JamesDSPLib *jdsp, int enable)
 {
-	jdsp->limiterEnabled = enable ? 1 : 0;
+	jdsp->outputControlEnabled = enable ? 1 : 0;
 	if (enable)
 		JLimiterInit(jdsp);
+}
+void JamesDSPSetSmoothVolumeGain(JamesDSPLib *jdsp, double gainDb)
+{
+	if (gainDb < -120.0)
+		gainDb = -120.0;
+	if (gainDb > 20.0)
+		gainDb = 20.0;
+	jdsp->smoothVolumeGain = db2magf(gainDb);
 }
 int JamesDSPGetMutexStatus(JamesDSPLib *jdsp)
 {
