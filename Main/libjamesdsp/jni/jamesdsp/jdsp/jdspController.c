@@ -355,25 +355,32 @@ void JamesDSPProcess(JamesDSPLib *jdsp, size_t n)
 	// Reverb
 	if (jdsp->reverbEnabled)
 		ReverbProcess(jdsp, n);
-	// Output
+	// Output. Post gain stays unconditional: root-mode smooth volume drives it
+	// independently of the user-facing output control switch.
 	for (size_t i = 0; i < n; i++)
 	{
 		float xL = jdsp->tmpBuffer[0][i] * jdsp->postGain;
 		float xR = jdsp->tmpBuffer[1][i] * jdsp->postGain;
-		float rect1 = fabsf(xL);
-		float rect2 = fabsf(xR);
-		float maxLR = max(rect1, rect2);
-		if (maxLR < jdsp->limiter.threshold)
-			maxLR = jdsp->limiter.threshold;
-		if (maxLR > jdsp->limiter.envOverThreshold)
-			jdsp->limiter.envOverThreshold = maxLR;
+		if (jdsp->limiterEnabled)
+		{
+			float rect1 = fabsf(xL);
+			float rect2 = fabsf(xR);
+			float maxLR = max(rect1, rect2);
+			if (maxLR < jdsp->limiter.threshold)
+				maxLR = jdsp->limiter.threshold;
+			if (maxLR > jdsp->limiter.envOverThreshold)
+				jdsp->limiter.envOverThreshold = maxLR;
+			else
+				jdsp->limiter.envOverThreshold = maxLR + jdsp->limiter.relCoef * (jdsp->limiter.envOverThreshold - maxLR);
+			float gR = jdsp->limiter.threshold / jdsp->limiter.envOverThreshold;
+			jdsp->tmpBuffer[0][i] = xL * gR;
+			jdsp->tmpBuffer[1][i] = xR * gR;
+		}
 		else
-			jdsp->limiter.envOverThreshold = maxLR + jdsp->limiter.relCoef * (jdsp->limiter.envOverThreshold - maxLR);
-		float gR = jdsp->limiter.threshold / jdsp->limiter.envOverThreshold;
-		rect1 = xL * gR;
-		rect2 = xR * gR;
-		jdsp->tmpBuffer[0][i] = rect1;
-		jdsp->tmpBuffer[1][i] = rect2;
+		{
+			jdsp->tmpBuffer[0][i] = xL;
+			jdsp->tmpBuffer[1][i] = xR;
+		}
 	}
 }
 void JamesDSPProcessCheckBenchmarkReady(JamesDSPLib *jdsp, size_t n)
@@ -423,25 +430,32 @@ void JamesDSPProcessCheckBenchmarkReady(JamesDSPLib *jdsp, size_t n)
 	// Reverb
 	if (jdsp->reverbEnabled)
 		ReverbProcess(jdsp, n);
-	// Output
+	// Output. Post gain stays unconditional: root-mode smooth volume drives it
+	// independently of the user-facing output control switch.
 	for (size_t i = 0; i < n; i++)
 	{
 		float xL = jdsp->tmpBuffer[0][i] * jdsp->postGain;
 		float xR = jdsp->tmpBuffer[1][i] * jdsp->postGain;
-		float rect1 = fabsf(xL);
-		float rect2 = fabsf(xR);
-		float maxLR = max(rect1, rect2);
-		if (maxLR < jdsp->limiter.threshold)
-			maxLR = jdsp->limiter.threshold;
-		if (maxLR > jdsp->limiter.envOverThreshold)
-			jdsp->limiter.envOverThreshold = maxLR;
+		if (jdsp->limiterEnabled)
+		{
+			float rect1 = fabsf(xL);
+			float rect2 = fabsf(xR);
+			float maxLR = max(rect1, rect2);
+			if (maxLR < jdsp->limiter.threshold)
+				maxLR = jdsp->limiter.threshold;
+			if (maxLR > jdsp->limiter.envOverThreshold)
+				jdsp->limiter.envOverThreshold = maxLR;
+			else
+				jdsp->limiter.envOverThreshold = maxLR + jdsp->limiter.relCoef * (jdsp->limiter.envOverThreshold - maxLR);
+			float gR = jdsp->limiter.threshold / jdsp->limiter.envOverThreshold;
+			jdsp->tmpBuffer[0][i] = xL * gR;
+			jdsp->tmpBuffer[1][i] = xR * gR;
+		}
 		else
-			jdsp->limiter.envOverThreshold = maxLR + jdsp->limiter.relCoef * (jdsp->limiter.envOverThreshold - maxLR);
-		float gR = jdsp->limiter.threshold / jdsp->limiter.envOverThreshold;
-		rect1 = xL * gR;
-		rect2 = xR * gR;
-		jdsp->tmpBuffer[0][i] = rect1;
-		jdsp->tmpBuffer[1][i] = rect2;
+		{
+			jdsp->tmpBuffer[0][i] = xL;
+			jdsp->tmpBuffer[1][i] = xR;
+		}
 	}
 	if (benchmarkCompletionFlag == 1)
 	{
@@ -1125,6 +1139,7 @@ void JamesDSPInit(JamesDSPLib *jdsp, int n, float sample_rate)
 	JLimiterInit(jdsp);
 	JLimiterSetCoefficients(jdsp, -(double)(FLT_EPSILON * 10.0f), 100.0);
 	jdsp->postGain = 1.0f;
+	jdsp->limiterEnabled = 1;
 	// Init effect
 	LiveProgConstructor(jdsp);
 	CompressorConstructor(jdsp);
@@ -1177,6 +1192,12 @@ void JamesDSPSetPostGain(JamesDSPLib *jdsp, double pGaindB)
 	if (pGaindB > 15.0f)
 		pGaindB = 15.0f;
 	jdsp->postGain = db2magf(pGaindB);
+}
+void JamesDSPSetLimiterEnabled(JamesDSPLib *jdsp, int enable)
+{
+	jdsp->limiterEnabled = enable ? 1 : 0;
+	if (enable)
+		JLimiterInit(jdsp);
 }
 int JamesDSPGetMutexStatus(JamesDSPLib *jdsp)
 {

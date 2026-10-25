@@ -647,6 +647,7 @@ int32_t EffectDSPMainCommand(EffectDSPMain *dspmain, uint32_t cmdCode, uint32_t 
 			int32_t cmd = ((int32_t *)cep)[3];
 			if (cmd == 1500)
 			{
+				// Legacy 3-float payload from older app versions: limiter stays enabled
 				double limThreshold = (double)((float*)cep)[4];
 				double limRelease = (double)((float*)cep)[5];
 				double postgain = (double)((float*)cep)[6];
@@ -662,6 +663,33 @@ int32_t EffectDSPMainCommand(EffectDSPMain *dspmain, uint32_t cmdCode, uint32_t 
 				JamesDSPSetPostGain(&dspmain->jdsp, postgain);
 #ifdef DEBUG
 				LOGE("limThreshold: %f, limRelease: %f, postgain: %f", limThreshold, limRelease, postgain);
+#endif
+				*replyData = 0;
+				return 0;
+			}
+		}
+		if (cep->psize == 4 && cep->vsize == 16)
+		{
+			int32_t cmd = ((int32_t *)cep)[3];
+			if (cmd == 1500)
+			{
+				double limThreshold = (double)((float*)cep)[4];
+				double limRelease = (double)((float*)cep)[5];
+				double postgain = (double)((float*)cep)[6];
+				int limiterEnabled = (int)((float*)cep)[7] != 0.0f;
+				if (limThreshold > -0.09)
+					limThreshold = -0.09;
+				if (limRelease < 0.15)
+					limRelease = 0.15;
+				if (postgain > 15.0)
+					postgain = 15.0;
+				if (postgain < -15.0)
+					postgain = -15.0;
+				JamesDSPSetLimiterEnabled(&dspmain->jdsp, limiterEnabled);
+				JLimiterSetCoefficients(&dspmain->jdsp, limThreshold, limRelease);
+				JamesDSPSetPostGain(&dspmain->jdsp, postgain);
+#ifdef DEBUG
+				LOGE("limiterEnabled: %d, limThreshold: %f, limRelease: %f, postgain: %f", limiterEnabled, limThreshold, limRelease, postgain);
 #endif
 				*replyData = 0;
 				return 0;
