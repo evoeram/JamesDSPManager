@@ -911,19 +911,25 @@ int32_t EffectDSPMainCommand(EffectDSPMain *dspmain, uint32_t cmdCode, uint32_t 
 					return 0;
 				}
 		}
-		/* Loudness config: 5 floats = 20 bytes */
-		if (cep->psize == 4 && cep->vsize == 20)
+		/* Loudness config: 6 floats = 24 bytes (mode-aware, current app),
+		 * or 5 floats = 20 bytes (legacy app builds, mode defaults to 0).
+		 * Layout: [0] sampleRate (ignored), [1] referenceLevel,
+		 * [2] referenceOffset, [3] attenuation, [4] volume, [5] mode
+		 * (0 = classic Fletcher-Munson, 1 = ISO 226:2023) */
+		if (cep->psize == 4 && (cep->vsize == 24 || cep->vsize == 20))
 		{
 			int32_t cmd = ((int32_t *)cep)[3];
 			if (cmd == 1301)
 				{
 					float *fdata = &((float*)cep)[4];
+					int numFloats = cep->vsize / 4;
+					int mode = numFloats >= 6 ? (int)fdata[5] : 0;
 					/* Всегда используем реальную частоту AudioFlinger (dspmain->jdsp.fs).
 					 * См. комментарий в cmd == 1300 выше. fdata[0] игнорируется. */
 					double sr = (double)dspmain->jdsp.fs;
 					loudness_configure(&dspmain->loudness, sr,
 						(double)fdata[1], (double)fdata[2],
-						(double)fdata[3], (double)fdata[4], 0);
+						(double)fdata[3], (double)fdata[4], mode);
 					*replyData = 0;
 					return 0;
 				}
@@ -936,6 +942,37 @@ int32_t EffectDSPMainCommand(EffectDSPMain *dspmain, uint32_t cmdCode, uint32_t 
 			{
 				float *fdata = &((float*)cep)[4];
 				loudness_set_volume(&dspmain->loudness, (double)fdata[0]);
+				*replyData = 0;
+				return 0;
+			}
+		}
+		/* Loudness tuning: 8 floats = 32 bytes
+		 * [0] lsFreq, [1] lsSlope, [2] lsRatio,
+		 * [3] hsFreq, [4] hsSlope, [5] hsRatio, [6] isoBasePhon, [7] isoQ */
+		if (cep->psize == 4 && cep->vsize == 32)
+		{
+			int32_t cmd = ((int32_t *)cep)[3];
+			if (cmd == 1303)
+			{
+				float *fdata = &((float*)cep)[4];
+				loudness_set_tuning(&dspmain->loudness,
+					(double)fdata[0], (double)fdata[1], (double)fdata[2],
+					(double)fdata[3], (double)fdata[4], (double)fdata[5],
+					(double)fdata[6], (double)fdata[7]);
+				*replyData = 0;
+				return 0;
+			}
+		}
+		/* Loudness subsonic filter: 4 floats = 16 bytes
+		 * [0] enable, [1] freq, [2] order, [3] qFactor */
+		if (cep->psize == 4 && cep->vsize == 16)
+		{
+			int32_t cmd = ((int32_t *)cep)[3];
+			if (cmd == 1304)
+			{
+				float *fdata = &((float*)cep)[4];
+				loudness_set_subsonic(&dspmain->loudness, fdata[0] != 0.0f,
+					(double)fdata[1], (int)fdata[2], (double)fdata[3]);
 				*replyData = 0;
 				return 0;
 			}

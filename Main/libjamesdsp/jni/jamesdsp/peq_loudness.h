@@ -9,7 +9,9 @@
  *   1214 — PEQ enable/disable (short)
  *   1300 — PEQ config (float array, variable size: 2 + N*5 floats, max 322 = 1288 bytes for 64 bands)
  *   1215 — Loudness enable/disable (short)
- *   1301 — Loudness config (5 floats = 20 bytes)
+ *   1301 — Loudness config (6 floats = 24 bytes: sr, refLevel, refOffset,
+ *          attenuation, volume, mode; legacy apps may send 5 floats = 20
+ *          bytes, mode defaults to 0)
  *   1302 — Loudness volume update (1 float = 4 bytes)
  *   1303 — Loudness tuning (8 floats = 32 bytes)
  *   1304 — Loudness subsonic filter (4 floats = 16 bytes)
