@@ -29,6 +29,9 @@ typedef struct
 	int bbMaxGain;
 	// Variables
 	int numTime2Send, samplesInc, stringIndex;
+	// Result of the last LiveProgStringParser call (>0 = script compiled);
+	// cmd 1213 refuses to enable liveprog after a broken script
+	int liveprogParseOk;
 	int16_t impChannels;
 	int32_t impulseLengthActual, convolverNeedRefresh;
 	// PEQ and loudness (root version extensions)
@@ -53,6 +56,7 @@ void EffectDSPMainConstructor(EffectDSPMain *dspmain)
 	dspmain->numTime2Send = 0;
 	dspmain->samplesInc = 0;
 	dspmain->stringIndex = 0;
+	dspmain->liveprogParseOk = 0;
 	JamesDSPInit(&dspmain->jdsp, 128, 48000.0f);
 	peq_cascade_init(&dspmain->peq);
 	loudness_init(&dspmain->loudness);
@@ -313,7 +317,13 @@ int32_t EffectDSPMainCommand(EffectDSPMain *dspmain, uint32_t cmdCode, uint32_t 
 			if (cmd == 128)
 			{
 				int reverbMode = (int)((int16_t *)cep)[8];
+				// Disable before re-configuring: Reverb_SetParam rewrites the
+				// reverb state that the realtime thread is reading
+				int reverbWasEnabled = dspmain->jdsp.reverbEnabled;
+				ReverbDisable(&dspmain->jdsp);
 				Reverb_SetParam(&dspmain->jdsp, reverbMode);
+				if (reverbWasEnabled)
+					ReverbEnable(&dspmain->jdsp);
 #ifdef DEBUG
 				LOGI("Reverb mode: %d", reverbMode);
 #endif
@@ -337,7 +347,13 @@ int32_t EffectDSPMainCommand(EffectDSPMain *dspmain, uint32_t cmdCode, uint32_t 
 					nMode = 0;
 				if (nMode > 5)
 					nMode = 5;
+				// Disable before re-configuring: CrossfeedChangeMode rewrites
+				// state that the realtime thread is reading
+				int crossfeedWasEnabled = dspmain->jdsp.crossfeedEnabled;
+				CrossfeedDisable(&dspmain->jdsp);
 				CrossfeedChangeMode(&dspmain->jdsp, nMode);
+				if (crossfeedWasEnabled)
+					CrossfeedEnable(&dspmain->jdsp, 1);
 #ifdef DEBUG
 				LOGI("Crossfeed mode: %d", nMode);
 #endif
@@ -501,10 +517,12 @@ int32_t EffectDSPMainCommand(EffectDSPMain *dspmain, uint32_t cmdCode, uint32_t 
 				int16_t EELEnabled = ((int16_t *)cep)[8];
 				if (!EELEnabled)
 					LiveProgDisable(&dspmain->jdsp);
-				else
+				else if (dspmain->liveprogParseOk)
+					// Only enable when the last script actually compiled; a
+					// broken script must never enter the audio path
 					LiveProgEnable(&dspmain->jdsp);
 #ifdef DEBUG
-				LOGE("Liveprog enabled: %d", EELEnabled);
+				LOGE("Liveprog enabled: %d (parseOk=%d)", EELEnabled, dspmain->liveprogParseOk);
 #endif
 				*replyData = 0;
 				return 0;
@@ -594,6 +612,11 @@ int32_t EffectDSPMainCommand(EffectDSPMain *dspmain, uint32_t cmdCode, uint32_t 
 					int errorCode = LiveProgStringParser(&dspmain->jdsp, dspmain->stringEq);
 					free(dspmain->stringEq);
 					dspmain->stringEq = 0;
+					// Remember whether the script compiled; cmd 1213 gates the
+					// enable call on this so broken scripts stay disabled
+					dspmain->liveprogParseOk = errorCode > 0 ? 1 : 0;
+					if (!dspmain->liveprogParseOk)
+						LiveProgDisable(&dspmain->jdsp);
 #ifdef DEBUG
 					LOGI("Live prog error message: %s", checkErrorCode(errorCode));
 #endif
@@ -726,10 +749,16 @@ int32_t EffectDSPMainCommand(EffectDSPMain *dspmain, uint32_t cmdCode, uint32_t 
 				LOGI("Compander tfresolution = %d", tfresolution);
 				LOGI("Compander axis: ");
 				for (int i = 0; i < 7; i++)
-					LOGI("%1.7lf %1.7lf; ", param[i], param[i + 7]);
+					LOGI("%1.7lf %1.7f; ", param[i], param[i + 7]);
 #endif
+				// Disable before re-configuring so the realtime thread never
+				// touches a half-updated compander state
+				int compWasEnabled = dspmain->jdsp.compEnabled;
+				CompressorDisable(&dspmain->jdsp);
 				CompressorSetParam(&dspmain->jdsp, timeconstant, granularity, tfresolution, 0);
 				CompressorSetGain(&dspmain->jdsp, param, param + 7, 1);
+				if (compWasEnabled)
+					CompressorEnable(&dspmain->jdsp, 1);
 				*replyData = 0;
 				return 0;
 			}
