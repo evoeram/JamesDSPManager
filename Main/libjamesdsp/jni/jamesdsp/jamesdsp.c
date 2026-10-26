@@ -12,6 +12,7 @@
 #include "essential.h"
 // Effect section
 #include "jdsp/jdsp_header.h"
+#include "jdsp/Effects/dynamicEq.h"
 #include "peq_loudness.h"
 typedef struct
 {
@@ -34,8 +35,9 @@ typedef struct
 	int liveprogParseOk;
 	int16_t impChannels;
 	int32_t impulseLengthActual, convolverNeedRefresh;
-	// PEQ and loudness (root version extensions)
+	// PEQ, Dynamic EQ and loudness (root version extensions)
 	peq_cascade_t peq;
+	dynamicEq_t dynamicEq;
 	loudness_t loudness;
 } EffectDSPMain;
 typedef struct
@@ -59,6 +61,7 @@ void EffectDSPMainConstructor(EffectDSPMain *dspmain)
 	dspmain->liveprogParseOk = 0;
 	JamesDSPInit(&dspmain->jdsp, 128, 48000.0f);
 	peq_cascade_init(&dspmain->peq);
+	dynamicEq_init(&dspmain->dynamicEq);
 	loudness_init(&dspmain->loudness);
 }
 void EffectDSPMainDestructor(EffectDSPMain *dspmain)
@@ -69,6 +72,7 @@ void EffectDSPMainDestructor(EffectDSPMain *dspmain)
 	if (dspmain->stringEq)
 		free(dspmain->stringEq);
 	pthread_mutex_destroy(&dspmain->peq.cfgLock);
+	dynamicEq_destroy(&dspmain->dynamicEq);
 #ifdef DEBUG
 	LOGI("Buffer freed");
 #endif
@@ -192,6 +196,9 @@ int32_t EffectDSPMainCommand(EffectDSPMain *dspmain, uint32_t cmdCode, uint32_t 
 			/* Помечаем loudness для перерасчёта коэффициентов */
 			dspmain->loudness.coeffsDirty = true;
 			dspmain->loudness.lastComputedVolume = 1e30;
+			/* Dynamic EQ: параметры полос сохраняются, коэффициенты
+			 * пересчитываются под новую fs, состояние фильтров сбрасывается. */
+			dynamicEq_refresh(&dspmain->dynamicEq, newFs);
 			/* PEQ требует полного reconfigure через Kotlin (syncWithPreferences).
 			 * Сбрасываем bandCount в обоих буферах каскада, чтобы избежать работы
 			 * со старыми коэффициентами до переотправки параметров. */
@@ -905,6 +912,13 @@ int32_t EffectDSPMainCommand(EffectDSPMain *dspmain, uint32_t cmdCode, uint32_t 
 				*replyData = 0;
 				return 0;
 			}
+			else if (cmd == 1219)
+			{
+				int16_t enabled = ((int16_t *)cep)[8];
+				dynamicEq_set_enabled(&dspmain->dynamicEq, enabled ? true : false);
+				*replyData = 0;
+				return 0;
+			}
 		}
 		/* Harmonic Expander config: 11 floats = 44 bytes
 		 * [0..8] = harmonic gains (harmonics 2–10), [9] = crossoverFreq, [10] = mix(0–100) */
@@ -955,6 +969,32 @@ int32_t EffectDSPMainCommand(EffectDSPMain *dspmain, uint32_t cmdCode, uint32_t 
 				NosR2RSetParam(&dspmain->jdsp, targetRate, bitDepth, resistorTolerance,
 					deviationGrowth, harmony, serialNumber, jitterAmount,
 					harmonicsAmount, invertPhase);
+				*replyData = 0;
+				return 0;
+			}
+		}
+		/* Dynamic EQ config: variable size, 3 header floats + N bands * 8 floats.
+		 * [0] = mix (0..100 %), [1] = M/S mode (0 stereo, 1 mid, 2 side),
+		 * [2] = band count, then frequency, q, threshold, ratio, attack,
+		 * release, range, mode per band. Max 8 bands = 67 floats = 268 bytes. */
+		if (cep->psize == 4 && cep->vsize >= 12 && cep->vsize <= 268 && (cep->vsize % 4) == 0)
+		{
+			int32_t cmd = ((int32_t *)cep)[3];
+			if (cmd == 1308)
+			{
+				float *fdata = &((float*)cep)[4];
+				int numFloats = cep->vsize / 4;
+				int bandCount = (int)fdata[2];
+				const int available = (numFloats - 3) / DYNEQ_VALUES_PER_BAND;
+				if (bandCount > available) bandCount = available;
+				if (bandCount > DYNEQ_MAX_BANDS) bandCount = DYNEQ_MAX_BANDS;
+				if (bandCount < 0) bandCount = 0;
+				/* Реальная частота AudioFlinger, как для PEQ/loudness. */
+				double sr = (double)dspmain->jdsp.fs;
+				dynamicEq_configure(&dspmain->dynamicEq, sr,
+					fdata + 3, bandCount);
+				dynamicEq_set_mix_ms(&dspmain->dynamicEq,
+					(double)fdata[0], (int)fdata[1]);
 				*replyData = 0;
 				return 0;
 			}
@@ -1108,9 +1148,11 @@ int32_t EffectDSPMainProcess(EffectDSPMain *dspmain, audio_buffer_t *in, audio_b
 		dspmain->jdsp.processInt8_24Multiplexd(&dspmain->jdsp, in->s32, out->s32, actualFrameCount);
 		break;
 	}
-	/* Apply PEQ cascade and loudness correction (root version extensions).
-	 * Convert output to float interleaved, process, convert back. */
-	if (dspmain->peq.enabled || dspmain->loudness.enabled)
+	/* Apply PEQ cascade, Dynamic EQ and loudness correction (root version
+	 * extensions). Dynamic EQ sits between PEQ and loudness so the loudness
+	 * stage sees the dynamically corrected signal. */
+	if (dspmain->peq.enabled || dynamicEq_is_active(&dspmain->dynamicEq) ||
+		dspmain->loudness.enabled)
 	{
 		/* Use a stack buffer; blockSizeMax bounds the frame count */
 		size_t totalSamples = actualFrameCount * 2; /* stereo interleaved */
@@ -1123,6 +1165,9 @@ int32_t EffectDSPMainProcess(EffectDSPMain *dspmain, audio_buffer_t *in, audio_b
 				for (size_t i = 0; i < totalSamples; i++)
 					tmpBuf[i] = (float)out->s16[i] / 32768.0f;
 				peq_cascade_process_interleaved(&dspmain->peq, tmpBuf, actualFrameCount);
+				/* Always called: the module fades out after disable and then
+				 * bypasses itself on the following blocks. */
+				dynamicEq_process_interleaved(&dspmain->dynamicEq, tmpBuf, actualFrameCount);
 				loudness_process_interleaved(&dspmain->loudness, tmpBuf, actualFrameCount);
 				for (size_t i = 0; i < totalSamples; i++)
 				{
@@ -1134,6 +1179,7 @@ int32_t EffectDSPMainProcess(EffectDSPMain *dspmain, audio_buffer_t *in, audio_b
 				break;
 			case 1: /* float */
 				peq_cascade_process_interleaved(&dspmain->peq, out->f32, actualFrameCount);
+				dynamicEq_process_interleaved(&dspmain->dynamicEq, out->f32, actualFrameCount);
 				loudness_process_interleaved(&dspmain->loudness, out->f32, actualFrameCount);
 				break;
 			case 2: /* int32 */
@@ -1141,6 +1187,9 @@ int32_t EffectDSPMainProcess(EffectDSPMain *dspmain, audio_buffer_t *in, audio_b
 				for (size_t i = 0; i < totalSamples; i++)
 					tmpBuf[i] = (float)out->s32[i] / 8388608.0f;
 				peq_cascade_process_interleaved(&dspmain->peq, tmpBuf, actualFrameCount);
+				/* Always called: the module fades out after disable and then
+				 * bypasses itself on the following blocks. */
+				dynamicEq_process_interleaved(&dspmain->dynamicEq, tmpBuf, actualFrameCount);
 				loudness_process_interleaved(&dspmain->loudness, tmpBuf, actualFrameCount);
 				for (size_t i = 0; i < totalSamples; i++)
 				{

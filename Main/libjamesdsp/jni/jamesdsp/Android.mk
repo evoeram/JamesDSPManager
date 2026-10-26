@@ -90,6 +90,7 @@ LOCAL_SRC_FILES := \
 	jdsp/Effects/eel2/y.tab.c \
 	jdsp/binaryBlobs.c \
 	jdsp/jdspController.c \
+	jdsp/Effects/dynamicEq.c \
 	peq_loudness.c \
 	jamesdsp.c \
 # terminator
