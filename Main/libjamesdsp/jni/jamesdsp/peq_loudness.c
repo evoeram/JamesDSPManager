@@ -153,21 +153,26 @@ void biquad_init(biquad_t *bq, peq_filter_type_t type, double dbGain,
 void peq_cascade_init(peq_cascade_t *peq)
 {
     memset(peq, 0, sizeof(*peq));
-    peq->sampleRate = 48000.0;
-    peq->preampLinear = 1.0;
+    peq->cfg[0].sampleRate = 48000.0;
+    peq->cfg[0].preampLinear = 1.0;
+    peq->cfg[1].sampleRate = 48000.0;
+    peq->cfg[1].preampLinear = 1.0;
+    peq->activeIdx = 0;
+    peq->enabled = false;
+    pthread_mutex_init(&peq->cfgLock, NULL);
 }
 
-void peq_cascade_configure(peq_cascade_t *peq, double sampleRate,
-                           const float *data, int numFloats)
+static void peq_cascade_build(peq_cascade_cfg_t *cfg, double sampleRate,
+                              const float *data, int numFloats)
 {
-    peq->sampleRate = sampleRate;
-    peq->bandCount = 0;
+    cfg->sampleRate = sampleRate;
+    cfg->bandCount = 0;
 
     if (numFloats < 2)
         return;
 
     double preampDb = (double)data[1];
-    peq->preampLinear = pow(10.0, preampDb / 20.0);
+    cfg->preampLinear = pow(10.0, preampDb / 20.0);
 
     /* Each band uses 5 floats: freq, gain, q, filterType, channelMode */
     int maxBands = (numFloats - 2) / 5;
@@ -198,7 +203,7 @@ void peq_cascade_configure(peq_cascade_t *peq, double sampleRate,
         if (cmode < 0 || cmode > 2)
             cmode = 0;
 
-        peq_band_t *band = &peq->bands[peq->bandCount];
+        peq_band_t *band = &cfg->bands[cfg->bandCount];
         band->channelMode = cmode;
         band->enabled = true;
         band->isPreamp = false;
@@ -208,7 +213,7 @@ void peq_cascade_configure(peq_cascade_t *peq, double sampleRate,
         if (ftype == PEQ_TYPE_PREAMP) {
             band->isPreamp = true;
             band->preampLinear = pow(10.0, gain / 20.0);
-            peq->bandCount++;
+            cfg->bandCount++;
             continue;
         }
 
@@ -216,8 +221,22 @@ void peq_cascade_configure(peq_cascade_t *peq, double sampleRate,
         biquad_init(&band->bqL, (peq_filter_type_t)ftype, gain, freq, sampleRate, q, false);
         biquad_init(&band->bqR, (peq_filter_type_t)ftype, gain, freq, sampleRate, q, false);
 
-        peq->bandCount++;
+        cfg->bandCount++;
     }
+}
+
+void peq_cascade_configure(peq_cascade_t *peq, double sampleRate,
+                           const float *data, int numFloats)
+{
+    /* Build the new band chain into the inactive buffer, then flip. The audio
+     * thread processes the active buffer under the same lock, so it can never
+     * observe a torn chain (mixed old/new coefficients can produce unstable
+     * biquads that stay broken because there is no NaN guard here). */
+    pthread_mutex_lock(&peq->cfgLock);
+    int inactive = 1 - peq->activeIdx;
+    peq_cascade_build(&peq->cfg[inactive], sampleRate, data, numFloats);
+    peq->activeIdx = inactive;
+    pthread_mutex_unlock(&peq->cfgLock);
 }
 
 void peq_cascade_set_enabled(peq_cascade_t *peq, bool enabled)
@@ -227,13 +246,26 @@ void peq_cascade_set_enabled(peq_cascade_t *peq, bool enabled)
 
 void peq_cascade_process_interleaved(peq_cascade_t *peq, float *data, size_t numFrames)
 {
-    if (!peq->enabled || peq->bandCount == 0)
+    if (!peq->enabled)
         return;
 
+    /* Hold cfgLock for the whole block: peq_cascade_configure may run on a
+     * control thread at any moment and the active band chain must not be
+     * swapped mid-block. Contended only for the duration of a configure. */
+    pthread_mutex_lock(&peq->cfgLock);
+
+    peq_cascade_cfg_t *cfg = &peq->cfg[peq->activeIdx];
+    int bandCount = cfg->bandCount;
+    if (bandCount == 0) {
+        pthread_mutex_unlock(&peq->cfgLock);
+        return;
+    }
+    double preampLinear = cfg->preampLinear;
+
     /* Apply preamp */
-    if (peq->preampLinear != 1.0) {
+    if (preampLinear != 1.0) {
         for (size_t i = 0; i < numFrames * 2; i++)
-            data[i] = (float)(data[i] * peq->preampLinear);
+            data[i] = (float)(data[i] * preampLinear);
     }
 
     /* Process through biquad cascade */
@@ -241,8 +273,8 @@ void peq_cascade_process_interleaved(peq_cascade_t *peq, float *data, size_t num
         double sampleL = data[i * 2];
         double sampleR = data[i * 2 + 1];
 
-        for (int b = 0; b < peq->bandCount; b++) {
-            peq_band_t *band = &peq->bands[b];
+        for (int b = 0; b < bandCount; b++) {
+            peq_band_t *band = &cfg->bands[b];
             if (!band->enabled)
                 continue;
 
@@ -284,6 +316,8 @@ void peq_cascade_process_interleaved(peq_cascade_t *peq, float *data, size_t num
         data[i * 2]     = (float)sampleL;
         data[i * 2 + 1] = (float)sampleR;
     }
+
+    pthread_mutex_unlock(&peq->cfgLock);
 }
 
 /* ================================================================ */

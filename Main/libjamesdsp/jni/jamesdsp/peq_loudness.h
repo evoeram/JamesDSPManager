@@ -22,6 +22,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <pthread.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -108,6 +109,17 @@ typedef struct {
     int bandCount;
     double sampleRate;
     double preampLinear;
+} peq_cascade_cfg_t;
+
+/* Double-buffered cascade: peq_cascade_configure() rebuilds the inactive
+ * configuration under cfgLock, then flips activeIdx, so the audio thread
+ * (peq_cascade_process_interleaved, which holds cfgLock for the whole block)
+ * never reads a half-written band chain. Biquad runtime state is written only
+ * by the audio thread inside the active buffer. */
+typedef struct {
+    peq_cascade_cfg_t cfg[2];
+    int activeIdx;
+    pthread_mutex_t cfgLock;
     bool enabled;
 } peq_cascade_t;
 

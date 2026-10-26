@@ -68,6 +68,7 @@ void EffectDSPMainDestructor(EffectDSPMain *dspmain)
 		free(dspmain->tempImpulseIncoming);
 	if (dspmain->stringEq)
 		free(dspmain->stringEq);
+	pthread_mutex_destroy(&dspmain->peq.cfgLock);
 #ifdef DEBUG
 	LOGI("Buffer freed");
 #endif
@@ -187,15 +188,19 @@ int32_t EffectDSPMainCommand(EffectDSPMain *dspmain, uint32_t cmdCode, uint32_t 
 			 * и вызовет syncWithPreferences, который переотправит параметры
 			 * с корректным sample rate. Здесь мы только обновляем sampleRate
 			 * в структурах, чтобы новый fs использовался при следующем configure. */
-			dspmain->peq.sampleRate = newFs;
 			dspmain->loudness.sampleRate = newFs;
 			/* Помечаем loudness для перерасчёта коэффициентов */
 			dspmain->loudness.coeffsDirty = true;
 			dspmain->loudness.lastComputedVolume = 1e30;
 			/* PEQ требует полного reconfigure через Kotlin (syncWithPreferences).
-			 * Сбрасываем bandCount, чтобы избежать работы со старыми
-			 * коэффициентами до переотправки параметров. */
-			dspmain->peq.bandCount = 0;
+			 * Сбрасываем bandCount в обоих буферах каскада, чтобы избежать работы
+			 * со старыми коэффициентами до переотправки параметров. */
+			pthread_mutex_lock(&dspmain->peq.cfgLock);
+			dspmain->peq.cfg[0].sampleRate = newFs;
+			dspmain->peq.cfg[1].sampleRate = newFs;
+			dspmain->peq.cfg[0].bandCount = 0;
+			dspmain->peq.cfg[1].bandCount = 0;
+			pthread_mutex_unlock(&dspmain->peq.cfgLock);
 		}
 		*replyData = 0;
 		return 0;
