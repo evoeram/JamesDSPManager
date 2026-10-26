@@ -13,6 +13,7 @@
 // Effect section
 #include "jdsp/jdsp_header.h"
 #include "jdsp/Effects/dynamicEq.h"
+#include "jdsp/Effects/lufs_normalizer.h"
 #include "peq_loudness.h"
 typedef struct
 {
@@ -35,10 +36,11 @@ typedef struct
 	int liveprogParseOk;
 	int16_t impChannels;
 	int32_t impulseLengthActual, convolverNeedRefresh;
-	// PEQ, Dynamic EQ and loudness (root version extensions)
+	// PEQ, Dynamic EQ, loudness and LUFS (root version extensions)
 	peq_cascade_t peq;
 	dynamicEq_t dynamicEq;
 	loudness_t loudness;
+	lufs_normalizer_t lufs;
 } EffectDSPMain;
 typedef struct
 {
@@ -63,6 +65,7 @@ void EffectDSPMainConstructor(EffectDSPMain *dspmain)
 	peq_cascade_init(&dspmain->peq);
 	dynamicEq_init(&dspmain->dynamicEq);
 	loudness_init(&dspmain->loudness);
+	lufs_normalizer_init(&dspmain->lufs);
 }
 void EffectDSPMainDestructor(EffectDSPMain *dspmain)
 {
@@ -199,6 +202,10 @@ int32_t EffectDSPMainCommand(EffectDSPMain *dspmain, uint32_t cmdCode, uint32_t 
 			/* Dynamic EQ: параметры полос сохраняются, коэффициенты
 			 * пересчитываются под новую fs, состояние фильтров сбрасывается. */
 			dynamicEq_refresh(&dspmain->dynamicEq, newFs);
+			/* LUFS: K-weighting и размер окна зависят от fs; параметры
+			 * (target/maxGain/mode) сохраняются, измерение начинается заново.
+			 * Kotlin-слой переотправит конфиг через syncWithPreferences. */
+			lufs_normalizer_refresh(&dspmain->lufs, newFs);
 			/* PEQ требует полного reconfigure через Kotlin (syncWithPreferences).
 			 * Сбрасываем bandCount в обоих буферах каскада, чтобы избежать работы
 			 * со старыми коэффициентами до переотправки параметров. */
@@ -919,6 +926,13 @@ int32_t EffectDSPMainCommand(EffectDSPMain *dspmain, uint32_t cmdCode, uint32_t 
 				*replyData = 0;
 				return 0;
 			}
+			else if (cmd == 1220)
+			{
+				int16_t enabled = ((int16_t *)cep)[8];
+				lufs_normalizer_set_enabled(&dspmain->lufs, enabled ? true : false);
+				*replyData = 0;
+				return 0;
+			}
 		}
 		/* Harmonic Expander config: 11 floats = 44 bytes
 		 * [0..8] = harmonic gains (harmonics 2–10), [9] = crossoverFreq, [10] = mix(0–100) */
@@ -995,6 +1009,23 @@ int32_t EffectDSPMainCommand(EffectDSPMain *dspmain, uint32_t cmdCode, uint32_t 
 					fdata + 3, bandCount);
 				dynamicEq_set_mix_ms(&dspmain->dynamicEq,
 					(double)fdata[0], (int)fdata[1]);
+				*replyData = 0;
+				return 0;
+			}
+		}
+		/* LUFS normalizer config: 3 floats = 12 bytes.
+		 * [0] = targetLufs (default -14), [1] = maxGainDb (default 6),
+		 * [2] = mode (0 slow, 1 normal, 2 fast gain smoothing).
+		 * The sample rate is taken from jdsp.fs, as for PEQ/loudness. */
+		if (cep->psize == 4 && cep->vsize == 12)
+		{
+			int32_t cmd = ((int32_t *)cep)[3];
+			if (cmd == 1309)
+			{
+				float *fdata = &((float*)cep)[4];
+				double sr = (double)dspmain->jdsp.fs;
+				lufs_normalizer_configure(&dspmain->lufs, sr,
+					(double)fdata[0], (double)fdata[1], (int)fdata[2]);
 				*replyData = 0;
 				return 0;
 			}
@@ -1148,11 +1179,12 @@ int32_t EffectDSPMainProcess(EffectDSPMain *dspmain, audio_buffer_t *in, audio_b
 		dspmain->jdsp.processInt8_24Multiplexd(&dspmain->jdsp, in->s32, out->s32, actualFrameCount);
 		break;
 	}
-	/* Apply PEQ cascade, Dynamic EQ and loudness correction (root version
-	 * extensions). Dynamic EQ sits between PEQ and loudness so the loudness
-	 * stage sees the dynamically corrected signal. */
+	/* Apply PEQ cascade, Dynamic EQ, loudness correction and LUFS targeting
+	 * (root version extensions). Dynamic EQ sits between PEQ and loudness so
+	 * the loudness stage sees the dynamically corrected signal; LUFS runs
+	 * last and normalizes the final program loudness. */
 	if (dspmain->peq.enabled || dynamicEq_is_active(&dspmain->dynamicEq) ||
-		dspmain->loudness.enabled)
+		dspmain->loudness.enabled || dspmain->lufs.enabled)
 	{
 		/* Use a stack buffer; blockSizeMax bounds the frame count */
 		size_t totalSamples = actualFrameCount * 2; /* stereo interleaved */
@@ -1169,6 +1201,7 @@ int32_t EffectDSPMainProcess(EffectDSPMain *dspmain, audio_buffer_t *in, audio_b
 				 * bypasses itself on the following blocks. */
 				dynamicEq_process_interleaved(&dspmain->dynamicEq, tmpBuf, actualFrameCount);
 				loudness_process_interleaved(&dspmain->loudness, tmpBuf, actualFrameCount);
+				lufs_normalizer_process_interleaved(&dspmain->lufs, tmpBuf, actualFrameCount);
 				for (size_t i = 0; i < totalSamples; i++)
 				{
 					float v = tmpBuf[i] * 32768.0f;
@@ -1181,6 +1214,7 @@ int32_t EffectDSPMainProcess(EffectDSPMain *dspmain, audio_buffer_t *in, audio_b
 				peq_cascade_process_interleaved(&dspmain->peq, out->f32, actualFrameCount);
 				dynamicEq_process_interleaved(&dspmain->dynamicEq, out->f32, actualFrameCount);
 				loudness_process_interleaved(&dspmain->loudness, out->f32, actualFrameCount);
+				lufs_normalizer_process_interleaved(&dspmain->lufs, out->f32, actualFrameCount);
 				break;
 			case 2: /* int32 */
 			case 4: /* int8_24 */
@@ -1191,6 +1225,7 @@ int32_t EffectDSPMainProcess(EffectDSPMain *dspmain, audio_buffer_t *in, audio_b
 				 * bypasses itself on the following blocks. */
 				dynamicEq_process_interleaved(&dspmain->dynamicEq, tmpBuf, actualFrameCount);
 				loudness_process_interleaved(&dspmain->loudness, tmpBuf, actualFrameCount);
+				lufs_normalizer_process_interleaved(&dspmain->lufs, tmpBuf, actualFrameCount);
 				for (size_t i = 0; i < totalSamples; i++)
 				{
 					float v = tmpBuf[i] * 8388608.0f;

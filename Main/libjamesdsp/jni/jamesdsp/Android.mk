@@ -91,6 +91,7 @@ LOCAL_SRC_FILES := \
 	jdsp/binaryBlobs.c \
 	jdsp/jdspController.c \
 	jdsp/Effects/dynamicEq.c \
+	jdsp/Effects/lufs_normalizer.c \
 	peq_loudness.c \
 	jamesdsp.c \
 # terminator
