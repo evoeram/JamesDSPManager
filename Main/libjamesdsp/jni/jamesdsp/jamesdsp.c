@@ -19,6 +19,7 @@
 #include "jdsp/Effects/field_surround.h"
 #include "jdsp/Effects/viper_agc.h"
 #include "jdsp/Effects/cure.h"
+#include "jdsp/Effects/tape.h"
 #include "peq_loudness.h"
 typedef struct
 {
@@ -51,6 +52,7 @@ typedef struct
 	field_surround_t fieldSurround;
 	viper_agc_t agc;
 	cure_t cure;
+	tape_t tape;
 } EffectDSPMain;
 typedef struct
 {
@@ -81,6 +83,7 @@ void EffectDSPMainConstructor(EffectDSPMain *dspmain)
 	field_surround_init(&dspmain->fieldSurround);
 	viper_agc_init(&dspmain->agc);
 	cure_init(&dspmain->cure);
+	tape_init(&dspmain->tape);
 }
 void EffectDSPMainDestructor(EffectDSPMain *dspmain)
 {
@@ -228,6 +231,10 @@ int32_t EffectDSPMainCommand(EffectDSPMain *dspmain, uint32_t cmdCode, uint32_t 
 			viper_clarity_refresh(&dspmain->viperClarity, newFs);
 			viper_agc_refresh(&dspmain->agc, newFs);
 			cure_refresh(&dspmain->cure, newFs);
+			/* Tape: глубины модуляции (в сэмплах), базовая задержка и длина
+			 * фейда зависят от fs; параметры сохраняются, линия задержки не
+			 * очищается (малый сдвиг вместо щелчка). */
+			tape_refresh(&dspmain->tape, newFs);
 			/* PEQ требует полного reconfigure через Kotlin (syncWithPreferences).
 			 * Сбрасываем bandCount в обоих буферах каскада, чтобы избежать работы
 			 * со старыми коэффициентами до переотправки параметров. */
@@ -990,6 +997,13 @@ int32_t EffectDSPMainCommand(EffectDSPMain *dspmain, uint32_t cmdCode, uint32_t 
 				*replyData = 0;
 				return 0;
 			}
+			else if (cmd == 1226)
+			{
+				int16_t enabled = ((int16_t *)cep)[8];
+				tape_set_enabled(&dspmain->tape, enabled ? true : false);
+				*replyData = 0;
+				return 0;
+			}
 		}
 		/* Harmonic Expander config: 11 floats = 44 bytes
 		 * [0..8] = harmonic gains (harmonics 2–10), [9] = crossoverFreq, [10] = mix(0–100) */
@@ -1151,6 +1165,22 @@ int32_t EffectDSPMainCommand(EffectDSPMain *dspmain, uint32_t cmdCode, uint32_t 
 				return 0;
 			}
 		}
+		/* Tape config: 6 floats = 24 bytes.
+		 * [0] = wowPct, [1] = flutterPct, [2] = saturationPct,
+		 * [3] = biasPct, [4] = headBumpDb, [5] = mixPct */
+		if (cep->psize == 4 && cep->vsize == 24)
+		{
+			int32_t cmd = ((int32_t *)cep)[3];
+			if (cmd == 1315)
+			{
+				float *fdata = &((float*)cep)[4];
+				double sr = (double)dspmain->jdsp.fs;
+				tape_configure(&dspmain->tape, sr,
+					fdata[0], fdata[1], fdata[2], fdata[3], fdata[4], fdata[5]);
+				*replyData = 0;
+				return 0;
+			}
+		}
 		/* PEQ config: variable size, 2 header floats + N bands * 5 floats each.
 		 * Accept up to PEQ_MAX_BANDS (64) = 322 floats = 1288 bytes.
 		 * Minimum: 2 floats (header only) = 8 bytes. */
@@ -1300,17 +1330,19 @@ int32_t EffectDSPMainProcess(EffectDSPMain *dspmain, audio_buffer_t *in, audio_b
 		dspmain->jdsp.processInt8_24Multiplexd(&dspmain->jdsp, in->s32, out->s32, actualFrameCount);
 		break;
 	}
-	/* Apply PEQ cascade, Dynamic EQ, ViPER extras, loudness correction and
-	 * LUFS targeting (root version extensions). Dynamic EQ sits between PEQ
-	 * and the extras; the extras keep the ViPER4Android relative order
-	 * (FET comp -> Cure -> Field Surround -> Clarity -> AGC) and run before
-	 * loudness so the level stages see the shaped signal; LUFS runs last and
-	 * normalizes the final program loudness. */
+	/* Apply PEQ cascade, Dynamic EQ, ViPER extras, tape, loudness correction
+	 * and LUFS targeting (root version extensions). Dynamic EQ sits between
+	 * PEQ and the extras; the extras keep the ViPER4Android relative order
+	 * (FET comp -> Cure -> Field Surround -> Clarity -> AGC), tape adds its
+	 * colour after them, and everything runs before loudness so the level
+	 * stages see the shaped signal; LUFS runs last and normalizes the final
+	 * program loudness. Tape is called even after disable so its fade-out
+	 * can finish; it bypasses itself once drained. */
 	if (dspmain->peq.enabled || dynamicEq_is_active(&dspmain->dynamicEq) ||
 		dspmain->loudness.enabled || dspmain->lufs.enabled ||
 		dspmain->fetComp.enabled || dspmain->viperClarity.enabled ||
 		dspmain->fieldSurround.enabled || dspmain->agc.enabled ||
-		dspmain->cure.enabled)
+		dspmain->cure.enabled || tape_is_active(&dspmain->tape))
 	{
 		/* Use a stack buffer; blockSizeMax bounds the frame count */
 		size_t totalSamples = actualFrameCount * 2; /* stereo interleaved */
@@ -1332,6 +1364,7 @@ int32_t EffectDSPMainProcess(EffectDSPMain *dspmain, audio_buffer_t *in, audio_b
 				field_surround_process_interleaved(&dspmain->fieldSurround, tmpBuf, actualFrameCount);
 				viper_clarity_process_interleaved(&dspmain->viperClarity, tmpBuf, actualFrameCount);
 				viper_agc_process_interleaved(&dspmain->agc, tmpBuf, actualFrameCount);
+				tape_process_interleaved(&dspmain->tape, tmpBuf, actualFrameCount);
 				loudness_process_interleaved(&dspmain->loudness, tmpBuf, actualFrameCount);
 				lufs_normalizer_process_interleaved(&dspmain->lufs, tmpBuf, actualFrameCount);
 				for (size_t i = 0; i < totalSamples; i++)
@@ -1350,6 +1383,7 @@ int32_t EffectDSPMainProcess(EffectDSPMain *dspmain, audio_buffer_t *in, audio_b
 				field_surround_process_interleaved(&dspmain->fieldSurround, out->f32, actualFrameCount);
 				viper_clarity_process_interleaved(&dspmain->viperClarity, out->f32, actualFrameCount);
 				viper_agc_process_interleaved(&dspmain->agc, out->f32, actualFrameCount);
+				tape_process_interleaved(&dspmain->tape, out->f32, actualFrameCount);
 				loudness_process_interleaved(&dspmain->loudness, out->f32, actualFrameCount);
 				lufs_normalizer_process_interleaved(&dspmain->lufs, out->f32, actualFrameCount);
 				break;
@@ -1367,6 +1401,7 @@ int32_t EffectDSPMainProcess(EffectDSPMain *dspmain, audio_buffer_t *in, audio_b
 				field_surround_process_interleaved(&dspmain->fieldSurround, tmpBuf, actualFrameCount);
 				viper_clarity_process_interleaved(&dspmain->viperClarity, tmpBuf, actualFrameCount);
 				viper_agc_process_interleaved(&dspmain->agc, tmpBuf, actualFrameCount);
+				tape_process_interleaved(&dspmain->tape, tmpBuf, actualFrameCount);
 				loudness_process_interleaved(&dspmain->loudness, tmpBuf, actualFrameCount);
 				lufs_normalizer_process_interleaved(&dspmain->lufs, tmpBuf, actualFrameCount);
 				for (size_t i = 0; i < totalSamples; i++)

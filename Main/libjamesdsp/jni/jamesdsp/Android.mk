@@ -97,6 +97,7 @@ LOCAL_SRC_FILES := \
 	jdsp/Effects/field_surround.c \
 	jdsp/Effects/viper_agc.c \
 	jdsp/Effects/cure.c \
+	jdsp/Effects/tape.c \
 	peq_loudness.c \
 	jamesdsp.c \
 # terminator
