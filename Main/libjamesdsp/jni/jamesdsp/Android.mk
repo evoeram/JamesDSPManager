@@ -92,6 +92,11 @@ LOCAL_SRC_FILES := \
 	jdsp/jdspController.c \
 	jdsp/Effects/dynamicEq.c \
 	jdsp/Effects/lufs_normalizer.c \
+	jdsp/Effects/fet_compressor.c \
+	jdsp/Effects/viper_clarity.c \
+	jdsp/Effects/field_surround.c \
+	jdsp/Effects/viper_agc.c \
+	jdsp/Effects/cure.c \
 	peq_loudness.c \
 	jamesdsp.c \
 # terminator

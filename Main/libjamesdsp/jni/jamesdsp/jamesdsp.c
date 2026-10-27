@@ -14,6 +14,11 @@
 #include "jdsp/jdsp_header.h"
 #include "jdsp/Effects/dynamicEq.h"
 #include "jdsp/Effects/lufs_normalizer.h"
+#include "jdsp/Effects/fet_compressor.h"
+#include "jdsp/Effects/viper_clarity.h"
+#include "jdsp/Effects/field_surround.h"
+#include "jdsp/Effects/viper_agc.h"
+#include "jdsp/Effects/cure.h"
 #include "peq_loudness.h"
 typedef struct
 {
@@ -36,11 +41,16 @@ typedef struct
 	int liveprogParseOk;
 	int16_t impChannels;
 	int32_t impulseLengthActual, convolverNeedRefresh;
-	// PEQ, Dynamic EQ, loudness and LUFS (root version extensions)
+	// PEQ, Dynamic EQ, loudness, LUFS and ViPER extras (root version extensions)
 	peq_cascade_t peq;
 	dynamicEq_t dynamicEq;
 	loudness_t loudness;
 	lufs_normalizer_t lufs;
+	fet_compressor_t fetComp;
+	viper_clarity_t viperClarity;
+	field_surround_t fieldSurround;
+	viper_agc_t agc;
+	cure_t cure;
 } EffectDSPMain;
 typedef struct
 {
@@ -66,6 +76,11 @@ void EffectDSPMainConstructor(EffectDSPMain *dspmain)
 	dynamicEq_init(&dspmain->dynamicEq);
 	loudness_init(&dspmain->loudness);
 	lufs_normalizer_init(&dspmain->lufs);
+	fet_compressor_init(&dspmain->fetComp);
+	viper_clarity_init(&dspmain->viperClarity);
+	field_surround_init(&dspmain->fieldSurround);
+	viper_agc_init(&dspmain->agc);
+	cure_init(&dspmain->cure);
 }
 void EffectDSPMainDestructor(EffectDSPMain *dspmain)
 {
@@ -206,6 +221,13 @@ int32_t EffectDSPMainCommand(EffectDSPMain *dspmain, uint32_t cmdCode, uint32_t 
 			 * (target/maxGain/mode) сохраняются, измерение начинается заново.
 			 * Kotlin-слой переотправит конфиг через syncWithPreferences. */
 			lufs_normalizer_refresh(&dspmain->lufs, newFs);
+			/* ViPER extras: fs-зависимые коэффициенты (attack/release
+			 * компрессора, полка Clarity, постоянные времени AGC, LPF Cure)
+			 * пересчитываются под новую fs; параметры сохраняются. */
+			fet_compressor_refresh(&dspmain->fetComp, newFs);
+			viper_clarity_refresh(&dspmain->viperClarity, newFs);
+			viper_agc_refresh(&dspmain->agc, newFs);
+			cure_refresh(&dspmain->cure, newFs);
 			/* PEQ требует полного reconfigure через Kotlin (syncWithPreferences).
 			 * Сбрасываем bandCount в обоих буферах каскада, чтобы избежать работы
 			 * со старыми коэффициентами до переотправки параметров. */
@@ -933,6 +955,41 @@ int32_t EffectDSPMainCommand(EffectDSPMain *dspmain, uint32_t cmdCode, uint32_t 
 				*replyData = 0;
 				return 0;
 			}
+			else if (cmd == 1221)
+			{
+				int16_t enabled = ((int16_t *)cep)[8];
+				fet_compressor_set_enabled(&dspmain->fetComp, enabled ? true : false);
+				*replyData = 0;
+				return 0;
+			}
+			else if (cmd == 1222)
+			{
+				int16_t enabled = ((int16_t *)cep)[8];
+				viper_clarity_set_enabled(&dspmain->viperClarity, enabled ? true : false);
+				*replyData = 0;
+				return 0;
+			}
+			else if (cmd == 1223)
+			{
+				int16_t enabled = ((int16_t *)cep)[8];
+				field_surround_set_enabled(&dspmain->fieldSurround, enabled ? true : false);
+				*replyData = 0;
+				return 0;
+			}
+			else if (cmd == 1224)
+			{
+				int16_t enabled = ((int16_t *)cep)[8];
+				viper_agc_set_enabled(&dspmain->agc, enabled ? true : false);
+				*replyData = 0;
+				return 0;
+			}
+			else if (cmd == 1225)
+			{
+				int16_t enabled = ((int16_t *)cep)[8];
+				cure_set_enabled(&dspmain->cure, enabled ? true : false);
+				*replyData = 0;
+				return 0;
+			}
 		}
 		/* Harmonic Expander config: 11 floats = 44 bytes
 		 * [0..8] = harmonic gains (harmonics 2–10), [9] = crossoverFreq, [10] = mix(0–100) */
@@ -1026,6 +1083,70 @@ int32_t EffectDSPMainCommand(EffectDSPMain *dspmain, uint32_t cmdCode, uint32_t 
 				double sr = (double)dspmain->jdsp.fs;
 				lufs_normalizer_configure(&dspmain->lufs, sr,
 					(double)fdata[0], (double)fdata[1], (int)fdata[2]);
+				*replyData = 0;
+				return 0;
+			}
+		}
+		/* ViPER extras configs. The sample rate is taken from jdsp.fs. */
+		/* FET compressor config: 5 floats = 20 bytes.
+		 * [0] = thresholdDb, [1] = ratio, [2] = attackMs,
+		 * [3] = releaseMs, [4] = makeupDb */
+		if (cep->psize == 4 && cep->vsize == 20)
+		{
+			int32_t cmd = ((int32_t *)cep)[3];
+			if (cmd == 1310)
+			{
+				float *fdata = &((float*)cep)[4];
+				double sr = (double)dspmain->jdsp.fs;
+				fet_compressor_configure(&dspmain->fetComp, sr,
+					(double)fdata[0], (double)fdata[1], (double)fdata[2],
+					(double)fdata[3], (double)fdata[4]);
+				*replyData = 0;
+				return 0;
+			}
+		}
+		/* ViPER Clarity config: 2 floats = 8 bytes.
+		 * [0] = mode (0 natural, 1 natural+shelf, 2 shelf), [1] = gainDb */
+		if (cep->psize == 4 && cep->vsize == 8)
+		{
+			int32_t cmd = ((int32_t *)cep)[3];
+			if (cmd == 1311)
+			{
+				float *fdata = &((float*)cep)[4];
+				double sr = (double)dspmain->jdsp.fs;
+				viper_clarity_configure(&dspmain->viperClarity, sr,
+					(int)fdata[0], (double)fdata[1]);
+				*replyData = 0;
+				return 0;
+			}
+			else if (cmd == 1312)
+			{
+				/* Field Surround config: 2 floats = 8 bytes.
+				 * [0] = strengthPct, [1] = midImagePct */
+				float *fdata = &((float*)cep)[4];
+				field_surround_configure(&dspmain->fieldSurround,
+					(double)fdata[0], (double)fdata[1]);
+				*replyData = 0;
+				return 0;
+			}
+			else if (cmd == 1313)
+			{
+				/* AGC config: 2 floats = 8 bytes.
+				 * [0] = targetPct, [1] = maxBoostDb */
+				float *fdata = &((float*)cep)[4];
+				double sr = (double)dspmain->jdsp.fs;
+				viper_agc_configure(&dspmain->agc, sr,
+					(double)fdata[0], (double)fdata[1]);
+				*replyData = 0;
+				return 0;
+			}
+			else if (cmd == 1314)
+			{
+				/* Cure config: 1 float = 4 bytes ([0] = level 0/1/2);
+				 * sent as 8 bytes for a uniform payload shape. */
+				float *fdata = &((float*)cep)[4];
+				double sr = (double)dspmain->jdsp.fs;
+				cure_configure(&dspmain->cure, sr, (int)fdata[0]);
 				*replyData = 0;
 				return 0;
 			}
@@ -1179,12 +1300,17 @@ int32_t EffectDSPMainProcess(EffectDSPMain *dspmain, audio_buffer_t *in, audio_b
 		dspmain->jdsp.processInt8_24Multiplexd(&dspmain->jdsp, in->s32, out->s32, actualFrameCount);
 		break;
 	}
-	/* Apply PEQ cascade, Dynamic EQ, loudness correction and LUFS targeting
-	 * (root version extensions). Dynamic EQ sits between PEQ and loudness so
-	 * the loudness stage sees the dynamically corrected signal; LUFS runs
-	 * last and normalizes the final program loudness. */
+	/* Apply PEQ cascade, Dynamic EQ, ViPER extras, loudness correction and
+	 * LUFS targeting (root version extensions). Dynamic EQ sits between PEQ
+	 * and the extras; the extras keep the ViPER4Android relative order
+	 * (FET comp -> Cure -> Field Surround -> Clarity -> AGC) and run before
+	 * loudness so the level stages see the shaped signal; LUFS runs last and
+	 * normalizes the final program loudness. */
 	if (dspmain->peq.enabled || dynamicEq_is_active(&dspmain->dynamicEq) ||
-		dspmain->loudness.enabled || dspmain->lufs.enabled)
+		dspmain->loudness.enabled || dspmain->lufs.enabled ||
+		dspmain->fetComp.enabled || dspmain->viperClarity.enabled ||
+		dspmain->fieldSurround.enabled || dspmain->agc.enabled ||
+		dspmain->cure.enabled)
 	{
 		/* Use a stack buffer; blockSizeMax bounds the frame count */
 		size_t totalSamples = actualFrameCount * 2; /* stereo interleaved */
@@ -1200,6 +1326,12 @@ int32_t EffectDSPMainProcess(EffectDSPMain *dspmain, audio_buffer_t *in, audio_b
 				/* Always called: the module fades out after disable and then
 				 * bypasses itself on the following blocks. */
 				dynamicEq_process_interleaved(&dspmain->dynamicEq, tmpBuf, actualFrameCount);
+				/* Extras process only when enabled (no fade-out tail). */
+				fet_compressor_process_interleaved(&dspmain->fetComp, tmpBuf, actualFrameCount);
+				cure_process_interleaved(&dspmain->cure, tmpBuf, actualFrameCount);
+				field_surround_process_interleaved(&dspmain->fieldSurround, tmpBuf, actualFrameCount);
+				viper_clarity_process_interleaved(&dspmain->viperClarity, tmpBuf, actualFrameCount);
+				viper_agc_process_interleaved(&dspmain->agc, tmpBuf, actualFrameCount);
 				loudness_process_interleaved(&dspmain->loudness, tmpBuf, actualFrameCount);
 				lufs_normalizer_process_interleaved(&dspmain->lufs, tmpBuf, actualFrameCount);
 				for (size_t i = 0; i < totalSamples; i++)
@@ -1213,6 +1345,11 @@ int32_t EffectDSPMainProcess(EffectDSPMain *dspmain, audio_buffer_t *in, audio_b
 			case 1: /* float */
 				peq_cascade_process_interleaved(&dspmain->peq, out->f32, actualFrameCount);
 				dynamicEq_process_interleaved(&dspmain->dynamicEq, out->f32, actualFrameCount);
+				fet_compressor_process_interleaved(&dspmain->fetComp, out->f32, actualFrameCount);
+				cure_process_interleaved(&dspmain->cure, out->f32, actualFrameCount);
+				field_surround_process_interleaved(&dspmain->fieldSurround, out->f32, actualFrameCount);
+				viper_clarity_process_interleaved(&dspmain->viperClarity, out->f32, actualFrameCount);
+				viper_agc_process_interleaved(&dspmain->agc, out->f32, actualFrameCount);
 				loudness_process_interleaved(&dspmain->loudness, out->f32, actualFrameCount);
 				lufs_normalizer_process_interleaved(&dspmain->lufs, out->f32, actualFrameCount);
 				break;
@@ -1224,6 +1361,12 @@ int32_t EffectDSPMainProcess(EffectDSPMain *dspmain, audio_buffer_t *in, audio_b
 				/* Always called: the module fades out after disable and then
 				 * bypasses itself on the following blocks. */
 				dynamicEq_process_interleaved(&dspmain->dynamicEq, tmpBuf, actualFrameCount);
+				/* Extras process only when enabled (no fade-out tail). */
+				fet_compressor_process_interleaved(&dspmain->fetComp, tmpBuf, actualFrameCount);
+				cure_process_interleaved(&dspmain->cure, tmpBuf, actualFrameCount);
+				field_surround_process_interleaved(&dspmain->fieldSurround, tmpBuf, actualFrameCount);
+				viper_clarity_process_interleaved(&dspmain->viperClarity, tmpBuf, actualFrameCount);
+				viper_agc_process_interleaved(&dspmain->agc, tmpBuf, actualFrameCount);
 				loudness_process_interleaved(&dspmain->loudness, tmpBuf, actualFrameCount);
 				lufs_normalizer_process_interleaved(&dspmain->lufs, tmpBuf, actualFrameCount);
 				for (size_t i = 0; i < totalSamples; i++)
