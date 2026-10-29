@@ -4,6 +4,16 @@
 #include <math.h>
 #include <float.h>
 #include "../jdsp_header.h"
+// Triode-like asymmetric soft clipper. Transparent at low drive, progressively
+// saturating as pregain rises - this is what actually makes the drive knob
+// audible. Asymmetry (different curve for each polarity) yields the even
+// harmonics that give tube gear its "warmth".
+static inline double tubeSat(double x)
+{
+	if (x >= 0.0)
+		return x / (1.0 + 0.85 * x);
+	return x / (1.0 - 0.55 * x);
+}
 void VTInit(VacuumTube *tb, double fs)
 {
 	tb->pregain = 1.0f;
@@ -69,8 +79,8 @@ void VTProcess(VacuumTube *tb, float *x1, float *x2, float *out1, float *out2, s
 				double harmonic3Ch2 = bandCh2[2] * bandCh2[2];
 				double harmonic4Ch2 = bandCh2[3] * bandCh2[3];
 				double harmonic5Ch2 = bandCh2[4] * bandCh2[4];
-				upsample[0][j] = (float)(bandCh1[0] + (harmonic2Ch1 + harmonic3Ch1 + harmonic4Ch1 + harmonic5Ch1) * 0.2 + allpassCh1 + bandCh1[5]);
-				upsample[1][j] = (float)(bandCh2[0] + (harmonic2Ch2 + harmonic3Ch2 + harmonic4Ch2 + harmonic5Ch2) * 0.2 + allpassCh2 + bandCh2[5]);
+				upsample[0][j] = (float)tubeSat(bandCh1[0] + (harmonic2Ch1 + harmonic3Ch1 + harmonic4Ch1 + harmonic5Ch1) * 0.2 + allpassCh1 + bandCh1[5]);
+				upsample[1][j] = (float)tubeSat(bandCh2[0] + (harmonic2Ch2 + harmonic3Ch2 + harmonic4Ch2 + harmonic5Ch2) * 0.2 + allpassCh2 + bandCh2[5]);
 			}
 			out1[i] = oversample_stepdownSmpFloat(&tb->smp[0], upsample[0]) * tb->postgain;
 			out2[i] = oversample_stepdownSmpFloat(&tb->smp[1], upsample[1]) * tb->postgain;
@@ -98,8 +108,8 @@ void VTProcess(VacuumTube *tb, float *x1, float *x2, float *out1, float *out2, s
 			double harmonic3Ch2 = bandCh2[2] * bandCh2[2];
 			double harmonic4Ch2 = bandCh2[3] * bandCh2[3];
 			double harmonic5Ch2 = bandCh2[4] * bandCh2[4];
-			out1[j] = (float)(bandCh1[0] + (harmonic2Ch1 + harmonic3Ch1 + harmonic4Ch1 + harmonic5Ch1) * 0.25f + allpassCh1 + bandCh1[5]) * tb->postgain;
-			out2[j] = (float)(bandCh2[0] + (harmonic2Ch2 + harmonic3Ch2 + harmonic4Ch2 + harmonic5Ch2) * 0.25f + allpassCh2 + bandCh2[5]) * tb->postgain;
+			out1[j] = (float)tubeSat(bandCh1[0] + (harmonic2Ch1 + harmonic3Ch1 + harmonic4Ch1 + harmonic5Ch1) * 0.25f + allpassCh1 + bandCh1[5]) * tb->postgain;
+			out2[j] = (float)tubeSat(bandCh2[0] + (harmonic2Ch2 + harmonic3Ch2 + harmonic4Ch2 + harmonic5Ch2) * 0.25f + allpassCh2 + bandCh2[5]) * tb->postgain;
 		}
 	}
 }
@@ -114,12 +124,16 @@ void VacuumTubeDisable(JamesDSPLib *jdsp)
 }
 void VacuumTubeSetGain(JamesDSPLib *jdsp, double dbGain)
 {
-	if (dbGain > 12.0)
-		dbGain = 12.0;
+	if (dbGain > 24.0)
+		dbGain = 24.0;
 	if (dbGain < -3.0)
 		dbGain = -3.0;
 	jdsp->tube.pregain = db2magf(dbGain);
-	jdsp->tube.postgain = 1.0f / jdsp->tube.pregain;
+	// Partial (not full) makeup: full 1/pregain cancelled the drive completely,
+	// leaving only a vanishing amplitude-squared term - which is why the effect
+	// used to be inaudible. Compensating partially keeps loudness roughly
+	// matched while letting the saturation through.
+	jdsp->tube.postgain = (float)(1.0 / pow((double)jdsp->tube.pregain, 0.6));
 }
 void VacuumTubeProcess(JamesDSPLib *jdsp, size_t n)
 {
