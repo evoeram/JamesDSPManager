@@ -44,7 +44,7 @@ void CrossfeedProcessTwoStageFFTConvolver2x4x2(JamesDSPLib *jdsp, size_t n)
 void CrossfeedEnable(JamesDSPLib *jdsp, char enable)
 {
     jdsp_lock(jdsp);
-	if (jdsp->crossfeedForceRefresh || !jdsp->advXF.conv[0] || !jdsp->advXF.conv[1] || !jdsp->advXF.conv[2] || !jdsp->advXF.convLong_S_S || !jdsp->advXF.convLong_T_S)
+	if (jdsp->crossfeedForceRefresh || !jdsp->advXF.conv[0] || !jdsp->advXF.conv[1] || !jdsp->advXF.conv[2] || (!jdsp->advXF.convLong_S_S && !jdsp->advXF.convLong_T_S))
 	{
 		CrossfeedDestructor(jdsp);
 		jdsp->advXF.conv[0] = (FFTConvolver2x4x2 *)malloc(sizeof(FFTConvolver2x4x2));
@@ -106,20 +106,25 @@ void CrossfeedChangeMode(JamesDSPLib *jdsp, int nMode)
 }
 void CrossfeedProcess(JamesDSPLib *jdsp, size_t n)
 {
-	if (jdsp->advXF.mode < 2)
+	/* Read the mode once. It used to be read again for every sample, so a
+	   change from BS2B to an HRTF mode in the middle of a block went on
+	   indexing bs2b[] (two entries) with 2 to 5, writing filter state
+	   over the DDC and convolver fields that follow it. */
+	const int mode = jdsp->advXF.mode;
+	if (mode < 2)
 	{
 		double tmpL, tmpR;
 		for (size_t i = 0; i < n; i++)
 		{
 			tmpL = (double)jdsp->tmpBuffer[0][i];
 			tmpR = (double)jdsp->tmpBuffer[1][i];
-			BS2BProcess(&jdsp->advXF.bs2b[jdsp->advXF.mode], &tmpL, &tmpR);
+			BS2BProcess(&jdsp->advXF.bs2b[mode], &tmpL, &tmpR);
 			jdsp->tmpBuffer[0][i] = (float)tmpL;
 			jdsp->tmpBuffer[1][i] = (float)tmpR;
 		}
 	}
-	else if (jdsp->advXF.mode < 5)
-		FFTConvolver2x4x2Process(jdsp->advXF.conv[jdsp->advXF.mode - 2], jdsp->tmpBuffer[0], jdsp->tmpBuffer[1], jdsp->tmpBuffer[0], jdsp->tmpBuffer[1], (unsigned int)n);
+	else if (mode < 5)
+		FFTConvolver2x4x2Process(jdsp->advXF.conv[mode - 2], jdsp->tmpBuffer[0], jdsp->tmpBuffer[1], jdsp->tmpBuffer[0], jdsp->tmpBuffer[1], (unsigned int)n);
 	else
 		jdsp->advXF.process(jdsp, (unsigned int)n);
 }
