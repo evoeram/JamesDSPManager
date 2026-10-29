@@ -22,8 +22,13 @@ void ArbitraryResponseEqualizerDestructor(JamesDSPLib *jdsp)
 	FFTConvolver2x2Free(&jdsp->arbMag.instance.convState);
 	FFTConvolver2x2Free(&jdsp->arbMag.conv);
 }
+/* The parser runs on the settings thread and takes the lock for the whole
+   job: it rewrites the generator's nodes and the convolver's segments that
+   the audio thread runs, and the audio thread also rebuilds the convolver
+   on a block size change (through Enable). */
 void ArbitraryResponseEqualizerStringParser(JamesDSPLib *jdsp, char *stringEq)
 {
+	jdsp_lock(jdsp);
 	ArbitraryEqString2SortedNodes(&jdsp->arbMag.instance.coeffGen, stringEq);
 	float *eqFil = jdsp->arbMag.instance.coeffGen.GetFilter(&jdsp->arbMag.instance.coeffGen, (float)jdsp->fs);
 	// A refresh rewrites the loaded segments in place, which is only right
@@ -41,13 +46,16 @@ void ArbitraryResponseEqualizerStringParser(JamesDSPLib *jdsp, char *stringEq)
 		FFTConvolver2x2LoadImpulseResponse(&jdsp->arbMag.instance.convState, (unsigned int)jdsp->blockSize, eqFil, eqFil, jdsp->arbMag.instance.filterLen);
 		FFTConvolver2x2LoadImpulseResponse(&jdsp->arbMag.conv, (unsigned int)jdsp->blockSize, eqFil, eqFil, jdsp->arbMag.instance.filterLen);
 	}
+	jdsp_unlock(jdsp);
 }
 void ArbitraryResponseEqualizerEnable(JamesDSPLib *jdsp, char enable)
 {
 	if (jdsp->arbMagForceRefresh)
 	{
-		float *eqFil = jdsp->arbMag.instance.coeffGen.GetFilter(&jdsp->arbMag.instance.coeffGen, (float)jdsp->fs);
+		/* The kept filters and the generator are chosen under the lock too:
+		   the settings thread frees and replaces both. */
 		jdsp_lock(jdsp);
+		float *eqFil = jdsp->arbMag.instance.coeffGen.GetFilter(&jdsp->arbMag.instance.coeffGen, (float)jdsp->fs);
 		FFTConvolver2x2Free(&jdsp->arbMag.instance.convState);
 		FFTConvolver2x2Free(&jdsp->arbMag.conv);
 		FFTConvolver2x2LoadImpulseResponse(&jdsp->arbMag.instance.convState, (unsigned int)jdsp->blockSize, eqFil, eqFil, jdsp->arbMag.instance.filterLen);

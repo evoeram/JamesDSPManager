@@ -396,7 +396,9 @@ int32_t EffectDSPMainCommand(EffectDSPMain *dspmain, uint32_t cmdCode, uint32_t 
 				if (nMode > 5)
 					nMode = 5;
 				// Disable before re-configuring: CrossfeedChangeMode rewrites
-				// state that the realtime thread is reading
+				// state that the realtime thread is reading (ChangeMode and
+				// Enable take the lock themselves; none of these calls may
+				// run with the lock already held).
 				int crossfeedWasEnabled = dspmain->jdsp.crossfeedEnabled;
 				CrossfeedDisable(&dspmain->jdsp);
 				CrossfeedChangeMode(&dspmain->jdsp, nMode);
@@ -421,10 +423,14 @@ int32_t EffectDSPMainCommand(EffectDSPMain *dspmain, uint32_t cmdCode, uint32_t 
 			else if (cmd == 1200)
 			{
 				int16_t compressorEnabled = ((int16_t *)cep)[8];
+				// Enable re-runs the compander rebuild when a rate change
+				// flagged it; the same lock the process dispatch holds.
+				jdsp_lock(&dspmain->jdsp);
 				if (!compressorEnabled)
 					CompressorDisable(&dspmain->jdsp);
 				else
 					CompressorEnable(&dspmain->jdsp, 1);
+				jdsp_unlock(&dspmain->jdsp);
 #ifdef DEBUG
 				LOGE("Compressor enabled: %d", compressorEnabled);
 #endif
@@ -799,14 +805,19 @@ int32_t EffectDSPMainCommand(EffectDSPMain *dspmain, uint32_t cmdCode, uint32_t 
 				for (int i = 0; i < 7; i++)
 					LOGI("%1.7lf %1.7f; ", param[i], param[i + 7]);
 #endif
-				// Disable before re-configuring so the realtime thread never
-				// touches a half-updated compander state
+				// Under the lock the compander's dispatch runs under: the
+				// rebuild swaps transform, lengths, windows and the function
+				// pointer that a concurrent block would jump through. The
+				// disable/re-enable dance stays inside the same critical
+				// section, so the audio thread never sees the gap.
+				jdsp_lock(&dspmain->jdsp);
 				int compWasEnabled = dspmain->jdsp.compEnabled;
 				CompressorDisable(&dspmain->jdsp);
 				CompressorSetParam(&dspmain->jdsp, timeconstant, granularity, tfresolution, 0);
 				CompressorSetGain(&dspmain->jdsp, param, param + 7, 1);
 				if (compWasEnabled)
 					CompressorEnable(&dspmain->jdsp, 1);
+				jdsp_unlock(&dspmain->jdsp);
 				*replyData = 0;
 				return 0;
 			}

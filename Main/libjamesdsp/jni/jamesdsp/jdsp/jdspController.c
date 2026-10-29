@@ -330,17 +330,30 @@ void JamesDSPProcess(JamesDSPLib *jdsp, size_t n)
 	if (jdsp->subHarmonicExpanderEnabled)
 		SubHarmonicExpanderProcess(jdsp, n);
 	// Input / Compressor
+	// Locked: a settings change re-runs FFTCompanderInit on this state
+	// (transform, lengths, windows, function pointer), and a block
+	// running on the half-built result jumped through a stale pointer
+	// with the new lengths and read gigabytes out of bounds.
+	jdsp_lock(jdsp);
 	if (jdsp->compEnabled)
 		CompressorProcess(jdsp, n);
+	jdsp_unlock(jdsp);
 	// IIR bass boost
 	if (jdsp->bassBoostEnabled)
 		BassBoostProcess(jdsp, n);
 	// Equalizer
+	// Locked: the convolver is rebuilt and refreshed from the settings
+	// thread, and a block must not run through it halfway.
+	jdsp_lock(jdsp);
 	if (jdsp->equalizerEnabled)
 		MultimodalEqualizerProcess(jdsp, n);
+	jdsp_unlock(jdsp);
 	// Arbitrary magnitude eq
+	// Locked for the same reason as the equalizer above.
+	jdsp_lock(jdsp);
 	if (jdsp->arbitraryMagEnabled)
 		ArbitraryResponseEqualizerProcess(jdsp, n);
+	jdsp_unlock(jdsp);
 	jdsp_lock(jdsp);
 	// Convolver
 	if (jdsp->convolverEnabled)
@@ -354,8 +367,13 @@ void JamesDSPProcess(JamesDSPLib *jdsp, size_t n)
 		LiveProgProcess(jdsp, n);
 	jdsp_unlock(jdsp);
 	// BS2B
+	// Locked like the convolver: CrossfeedEnable frees and rebuilds these
+	// convolvers from the settings thread, and a block running through
+	// them meanwhile read freed memory or a null pointer.
+	jdsp_lock(jdsp);
 	if (jdsp->crossfeedEnabled)
 		CrossfeedProcess(jdsp, n);
+	jdsp_unlock(jdsp);
 	// Stereo widening
 	if (jdsp->sterEnhEnabled)
 		StereoEnhancementProcess(jdsp, n);
@@ -408,17 +426,30 @@ void JamesDSPProcessCheckBenchmarkReady(JamesDSPLib *jdsp, size_t n)
 	if (jdsp->subHarmonicExpanderEnabled)
 		SubHarmonicExpanderProcess(jdsp, n);
 	// Input / Compressor
+	// Locked: a settings change re-runs FFTCompanderInit on this state
+	// (transform, lengths, windows, function pointer), and a block
+	// running on the half-built result jumped through a stale pointer
+	// with the new lengths and read gigabytes out of bounds.
+	jdsp_lock(jdsp);
 	if (jdsp->compEnabled)
 		CompressorProcess(jdsp, n);
+	jdsp_unlock(jdsp);
 	// IIR bass boost
 	if (jdsp->bassBoostEnabled)
 		BassBoostProcess(jdsp, n);
 	// Equalizer
+	// Locked: the convolver is rebuilt and refreshed from the settings
+	// thread, and a block must not run through it halfway.
+	jdsp_lock(jdsp);
 	if (jdsp->equalizerEnabled)
 		MultimodalEqualizerProcess(jdsp, n);
+	jdsp_unlock(jdsp);
 	// Arbitrary magnitude eq
+	// Locked for the same reason as the equalizer above.
+	jdsp_lock(jdsp);
 	if (jdsp->arbitraryMagEnabled)
 		ArbitraryResponseEqualizerProcess(jdsp, n);
+	jdsp_unlock(jdsp);
 	jdsp_lock(jdsp);
 	// Convolver
 	if (jdsp->convolverEnabled)
@@ -432,8 +463,13 @@ void JamesDSPProcessCheckBenchmarkReady(JamesDSPLib *jdsp, size_t n)
 		LiveProgProcess(jdsp, n);
 	jdsp_unlock(jdsp);
 	// BS2B
+	// Locked like the convolver: CrossfeedEnable frees and rebuilds these
+	// convolvers from the settings thread, and a block running through
+	// them meanwhile read freed memory or a null pointer.
+	jdsp_lock(jdsp);
 	if (jdsp->crossfeedEnabled)
 		CrossfeedProcess(jdsp, n);
+	jdsp_unlock(jdsp);
 	// Stereo widening
 	if (jdsp->sterEnhEnabled)
 		StereoEnhancementProcess(jdsp, n);
@@ -1270,22 +1306,32 @@ void JamesDSPSetSampleRate(JamesDSPLib *jdsp, float new_sample_rate, int forceRe
 		jdsp->fs = jdsp->trueSampleRate;
 	}
 	JamesDSPRefreshBlob(jdsp, jdsp->fs);
+	char deferCrossfeed = 0, deferArbEq = 0, deferEqualizer = 0, deferStereo = 0;
 	if (forceRefresh)
 	{
 		BassBoostSetParam(jdsp, jdsp->dbb.maxGain);
 		jdsp->ddcForceRefresh = 1;
 		DDCEnable(jdsp, jdsp->ddcEnabled);
-		jdsp->crossfeedForceRefresh = 1;
-		CrossfeedEnable(jdsp, jdsp->crossfeedEnabled);
-		jdsp->arbMagForceRefresh = 1;
-		ArbitraryResponseEqualizerEnable(jdsp, jdsp->arbitraryMagEnabled);
-		jdsp->equalizerForceRefresh = 1;
-		MultimodalEqualizerEnable(jdsp, jdsp->equalizerEnabled);
 		jdsp->compForceRefresh = 1;
 		CompressorEnable(jdsp, jdsp->compEnabled);
-		StereoEnhancementRefresh(jdsp);
+		/* The crossfeed, both EQs and the stereo widening take the lock
+		   themselves, and it is not recursive: called here they hung this
+		   thread for good, and the audio thread with it. They are flagged
+		   here and run after the unlock below. */
+		jdsp->crossfeedForceRefresh = 1;
+		jdsp->arbMagForceRefresh = 1;
+		jdsp->equalizerForceRefresh = 1;
+		deferCrossfeed = deferArbEq = deferEqualizer = deferStereo = 1;
 	}
 	jdsp_unlock(jdsp);
+	if (deferCrossfeed)
+		CrossfeedEnable(jdsp, jdsp->crossfeedEnabled);
+	if (deferArbEq)
+		ArbitraryResponseEqualizerEnable(jdsp, jdsp->arbitraryMagEnabled);
+	if (deferEqualizer)
+		MultimodalEqualizerEnable(jdsp, jdsp->equalizerEnabled);
+	if (deferStereo)
+		StereoEnhancementRefresh(jdsp);
 }
 void JamesDSPFree(JamesDSPLib *jdsp)
 {

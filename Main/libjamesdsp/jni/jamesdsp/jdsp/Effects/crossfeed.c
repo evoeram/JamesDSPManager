@@ -94,6 +94,9 @@ void CrossfeedChangeMode(JamesDSPLib *jdsp, int nMode)
 		nMode = 0;
 	if (nMode > 5)
 		nMode = 5;
+	/* Under the lock: CrossfeedProcess reads the mode and the BS2B state on
+	   the audio thread. Not to be called with the lock held. */
+	jdsp_lock(jdsp);
 	if (nMode < 2)
 	{
 		memset(&jdsp->advXF.bs2b, 0, sizeof(jdsp->advXF.bs2b));
@@ -103,6 +106,7 @@ void CrossfeedChangeMode(JamesDSPLib *jdsp, int nMode)
 			BS2BInit(&jdsp->advXF.bs2b[1], (unsigned int)jdsp->fs, BS2B_JMEIER_CLEVEL);
 	}
 	jdsp->advXF.mode = nMode;
+	jdsp_unlock(jdsp);
 }
 void CrossfeedProcess(JamesDSPLib *jdsp, size_t n)
 {
