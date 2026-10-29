@@ -26,7 +26,21 @@ void ArbitraryResponseEqualizerStringParser(JamesDSPLib *jdsp, char *stringEq)
 {
 	ArbitraryEqString2SortedNodes(&jdsp->arbMag.instance.coeffGen, stringEq);
 	float *eqFil = jdsp->arbMag.instance.coeffGen.GetFilter(&jdsp->arbMag.instance.coeffGen, (float)jdsp->fs);
-	FFTConvolver2x2RefreshImpulseResponse(&jdsp->arbMag.instance.convState, &jdsp->arbMag.conv, eqFil, eqFil, jdsp->arbMag.instance.filterLen);
+	// A refresh rewrites the loaded segments in place, which is only right
+	// while the filter needs the same number of segments as the one loaded
+	// (the phase switch in the FIR equalizer changes the filter length).
+	// When the count differs, load in full, the same way the deferred
+	// refresh in Enable does.
+	const unsigned int bs = jdsp->arbMag.instance.convState._blockSize;
+	if (bs && (jdsp->arbMag.instance.filterLen + bs - 1) / bs == jdsp->arbMag.instance.convState._segCount)
+		FFTConvolver2x2RefreshImpulseResponse(&jdsp->arbMag.instance.convState, &jdsp->arbMag.conv, eqFil, eqFil, jdsp->arbMag.instance.filterLen);
+	else
+	{
+		FFTConvolver2x2Free(&jdsp->arbMag.instance.convState);
+		FFTConvolver2x2Free(&jdsp->arbMag.conv);
+		FFTConvolver2x2LoadImpulseResponse(&jdsp->arbMag.instance.convState, (unsigned int)jdsp->blockSize, eqFil, eqFil, jdsp->arbMag.instance.filterLen);
+		FFTConvolver2x2LoadImpulseResponse(&jdsp->arbMag.conv, (unsigned int)jdsp->blockSize, eqFil, eqFil, jdsp->arbMag.instance.filterLen);
+	}
 }
 void ArbitraryResponseEqualizerEnable(JamesDSPLib *jdsp, char enable)
 {
