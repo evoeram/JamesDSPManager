@@ -121,11 +121,19 @@ void InitSpectralInterpolator(char *octaveSmooth, unsigned int fcLen, unsigned i
 	memcpy(octaveSmooth + sizeof(unsigned int) + sizeof(float) + sizeof(unsigned int) + (idxLen << 1) * sizeof(unsigned int), multiplicationPrecompute, idxLen * sizeof(float));
 	float *mLevel_1 = (float*)(octaveSmooth + sizeof(unsigned int) + sizeof(float) + sizeof(unsigned int) + (idxLen << 1) * sizeof(unsigned int) + idxLen * sizeof(float));
 	float *mLevel_2 = (float*)(octaveSmooth + sizeof(unsigned int) + sizeof(float) + sizeof(unsigned int) + (idxLen << 1) * sizeof(unsigned int) + idxLen * sizeof(float) + (idxLen + 3) * sizeof(float));
-	for (i = 0; i < idxLen + 3; i++)
+	/* The levels array holds idxLen + 3 entries (indices 0 .. idxLen + 2, all
+	   filled by initInterpolationList). A slope for the last mLevel_2 slot
+	   would need levels[idxLen + 3], which was never a real level - the old
+	   loop read one double past the allocation (ASAN: heap-buffer-overflow in
+	   the compander rebuild). The interpolation consumer tops out at
+	   mLevel_2[idxLen + 1], so the last slot gets the previous slope. */
+	for (i = 0; i < idxLen + 2; i++)
 	{
 		mLevel_1[i] = (float)levels[i];
 		mLevel_2[i] = (float)(1.0 / (levels[i + 1] - levels[i]));
 	}
+	mLevel_1[idxLen + 2] = (float)levels[idxLen + 2];
+	mLevel_2[idxLen + 2] = mLevel_2[idxLen + 1];
 	free(levels);
 	free(multiplicationPrecompute);
 	free(indexList);
