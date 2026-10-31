@@ -560,6 +560,17 @@ typedef struct
 {
 	ArbEqConv instance;
 	FFTConvolver2x2 conv;
+	/* 0 = minimum phase, 1 = linear phase; baked into the coefficient
+	   generator at init, so a switch rebuilds it (SetPhaseMode). */
+	int linearPhase;
+	/* Kept copies of the two channels' filters. The generator hands back a
+	   pointer into itself, which the next call overwrites, so building a
+	   second curve means copying the first out first. Holding both also lets
+	   the deferred refresh in Enable reload them without the caller having to
+	   send the node strings again. keptLen == 0 (or != filterLen) means no
+	   usable copy and both channels fall back to the generator's filter. */
+	float *filterL, *filterR;
+	unsigned int keptLen;
 } arbitraryMagnitude;
 typedef struct
 {
@@ -756,7 +767,11 @@ extern int Convolver1DLoadImpulseResponse(JamesDSPLib *jdsp, float *tempImpulseF
 // Arbitrary magnitude response
 extern void ArbitraryResponseEqualizerConstructor(JamesDSPLib *jdsp);
 extern void ArbitraryResponseEqualizerDestructor(JamesDSPLib *jdsp);
+extern void ArbitraryResponseEqualizerSetPhaseMode(JamesDSPLib *jdsp, int linearPhase);
 extern void ArbitraryResponseEqualizerStringParser(JamesDSPLib *jdsp, char *stringEq);
+/* Same, but with a different curve for each ear. Used by the parametric EQ
+   when any of its bands is assigned to one channel rather than both. */
+extern void ArbitraryResponseEqualizerStringParserStereo(JamesDSPLib *jdsp, char *stringEqLeft, char *stringEqRight);
 extern void ArbitraryResponseEqualizerEnable(JamesDSPLib *jdsp, char enable);
 extern void ArbitraryResponseEqualizerDisable(JamesDSPLib *jdsp);
 extern void ArbitraryResponseEqualizerProcess(JamesDSPLib *jdsp, size_t n);
