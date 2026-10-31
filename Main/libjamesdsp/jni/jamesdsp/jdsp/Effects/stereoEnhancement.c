@@ -58,6 +58,11 @@ void StereoEnhancementProcess(JamesDSPLib *jdsp, size_t n)
 	float y1, y2;
 	for (size_t i = 0; i < n; i++)
 	{
+		/* A NaN or Inf in stays in the filterbank and the band envelopes for
+		   good, and switching the card off and on does not clear them, so
+		   every sample out was NaN for the life of the engine. Keep it out. */
+		if (!isfinite(jdsp->tmpBuffer[0][i])) jdsp->tmpBuffer[0][i] = 0.0f;
+		if (!isfinite(jdsp->tmpBuffer[1][i])) jdsp->tmpBuffer[1][i] = 0.0f;
 		analysisWarpedPFBStereo(subband0, subband1, &jdsp->tmpBuffer[0][i], &jdsp->tmpBuffer[1][i]);
 		for (int j = 0; j < 5; j++)
 		{

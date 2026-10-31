@@ -415,6 +415,12 @@ void JamesDSPProcess(JamesDSPLib *jdsp, size_t n)
 	{
 		float xL = jdsp->tmpBuffer[0][i] * outGain;
 		float xR = jdsp->tmpBuffer[1][i] * outGain;
+		// A non-finite sample latched the limiter for good: once its envelope
+		// is Inf the gain is 0 (silence) and once it is NaN every sample out
+		// is NaN, and nothing but a new engine reset it. Drop it here, before
+		// the limiter sees it.
+		if (!isfinite(xL)) xL = 0.0f;
+		if (!isfinite(xR)) xR = 0.0f;
 		if (jdsp->outputControlEnabled)
 		{
 			float rect1 = fabsf(xL);
@@ -511,6 +517,12 @@ void JamesDSPProcessCheckBenchmarkReady(JamesDSPLib *jdsp, size_t n)
 	{
 		float xL = jdsp->tmpBuffer[0][i] * outGain;
 		float xR = jdsp->tmpBuffer[1][i] * outGain;
+		// A non-finite sample latched the limiter for good: once its envelope
+		// is Inf the gain is 0 (silence) and once it is NaN every sample out
+		// is NaN, and nothing but a new engine reset it. Drop it here, before
+		// the limiter sees it.
+		if (!isfinite(xL)) xL = 0.0f;
+		if (!isfinite(xR)) xR = 0.0f;
 		if (jdsp->outputControlEnabled)
 		{
 			float rect1 = fabsf(xL);
