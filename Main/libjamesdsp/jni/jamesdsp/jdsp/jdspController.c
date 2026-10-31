@@ -251,6 +251,35 @@ unsigned int next_pow_2(unsigned int x)
 	while (x >>= 1) power <<= 1;
 	return power;
 }
+// Length of each ASRC work area for blocks of up to n frames, and sets
+// pw2BlockMemSize for the output rings. The work areas hold the input, the
+// resampled block and the block resampled back. Above 48 kHz the resampled
+// block is shorter than n, but below 44.1 kHz it is longer: 4096 frames at
+// 8 kHz become 24576 at 48 kHz. The areas used to be sized for n alone, so
+// below 44.1 kHz the two channels overlapped and at 12 kHz and under the
+// block ran off the end of the allocation. The few spare samples cover the
+// polyphase filters' phase carry from one block to the next.
+static size_t JamesDSPASRCWorkLength(JamesDSPLib *jdsp, size_t n)
+{
+	double ratio = (double)jdsp->fs / (double)jdsp->trueSampleRate;
+	unsigned int maxDecimatedLength = (unsigned int)ceil(n * ratio);
+	unsigned int maxInterpolatedLength = (unsigned int)ceil(maxDecimatedLength / ratio);
+	jdsp->pw2BlockMemSize = next_pow_2(maxInterpolatedLength);
+	size_t workLen = n;
+	if (maxDecimatedLength > workLen)
+		workLen = maxDecimatedLength;
+	if (maxInterpolatedLength > workLen)
+		workLen = maxInterpolatedLength;
+	return workLen + (size_t)ceil(ratio) + (size_t)ceil(1.0 / ratio) + 2;
+}
+static void JamesDSPASRCAssign(JamesDSPLib *jdsp, size_t workLen)
+{
+	jdsp->tmpBuffer[1] = jdsp->tmpBuffer[0] + workLen;
+	jdsp->tmpBuffer[2] = jdsp->tmpBuffer[1] + workLen;
+	jdsp->tmpBuffer[3] = jdsp->tmpBuffer[2] + workLen;
+	jdsp->tmpBuffer[4] = jdsp->tmpBuffer[3] + workLen;
+	jdsp->tmpBuffer[5] = jdsp->tmpBuffer[4] + jdsp->pw2BlockMemSize;
+}
 void JamesDSPReallocateBlock(JamesDSPLib *jdsp, size_t n)
 {
 	// Init buffer
@@ -260,22 +289,19 @@ void JamesDSPReallocateBlock(JamesDSPLib *jdsp, size_t n)
 	float *tmp4 = jdsp->tmpBuffer[3];
 	float *tmp5 = jdsp->tmpBuffer[4];
 	float *tmp6 = jdsp->tmpBuffer[5];
-	double ratio = (double)jdsp->fs / (double)jdsp->trueSampleRate;
 	jdsp->blockSizeMax = n;
-	unsigned int maxDecimatedLength = (unsigned int)ceil(jdsp->blockSizeMax * ratio);
-	if (!jdsp->enableASRC)
-		maxDecimatedLength = 0;
-	unsigned int maxInterpolatedLength = (unsigned int)ceil(maxDecimatedLength / ratio);
-	jdsp->pw2BlockMemSize = next_pow_2(maxInterpolatedLength);
-	if (!jdsp->enableASRC)
+	if (jdsp->enableASRC)
+	{
+		size_t workLen = JamesDSPASRCWorkLength(jdsp, n);
+		jdsp->tmpBuffer[0] = (float *)malloc((workLen * 4 + jdsp->pw2BlockMemSize * 2) * sizeof(float));
+		JamesDSPASRCAssign(jdsp, workLen);
+	}
+	else
+	{
 		jdsp->pw2BlockMemSize = 0;
-	size_t ctMemBlk = jdsp->blockSizeMax * 2 + maxInterpolatedLength * 2 + jdsp->pw2BlockMemSize * 2;
-	jdsp->tmpBuffer[0] = (float *)malloc(ctMemBlk * sizeof(float));
-	jdsp->tmpBuffer[1] = jdsp->tmpBuffer[0] + jdsp->blockSizeMax;
-	jdsp->tmpBuffer[2] = jdsp->tmpBuffer[1] + jdsp->blockSizeMax;
-	jdsp->tmpBuffer[3] = jdsp->tmpBuffer[2] + maxInterpolatedLength;
-	jdsp->tmpBuffer[4] = jdsp->tmpBuffer[3] + maxInterpolatedLength;
-	jdsp->tmpBuffer[5] = jdsp->tmpBuffer[4] + jdsp->pw2BlockMemSize;
+		jdsp->tmpBuffer[0] = (float *)malloc(jdsp->blockSizeMax * 2 * sizeof(float));
+		JamesDSPASRCAssign(jdsp, jdsp->blockSizeMax);
+	}
 	if (tmp1)
 		free(tmp1);
 }
@@ -646,6 +672,32 @@ void DoASRC_bwd(JamesDSPLib *jdsp, unsigned int curDecimatedLen, size_t n)
 	const int howManyItemsLeft1 = (int)jdsp->asrc[0].intermediateRing.in - (int)jdsp->asrc[0].intermediateRing.out;
 	const int howManyItemsLeft2 = (int)jdsp->asrc[0].intermediateRing.in - (int)jdsp->asrc[0].intermediateRing.out;
 }
+// The effects were all set up for the original block size, so a resampled
+// block longer than it (a stream rate below 44.1 kHz grows the block) is fed
+// through the chain in pieces no longer than it. Above 48 kHz nothing
+// changes: the block is shorter and goes through in one call as before.
+static void JamesDSPProcessResampled(JamesDSPLib *jdsp, unsigned int len)
+{
+	if (len <= jdsp->blockSizeMax)
+	{
+		jdsp->processInternal(jdsp, len);
+		return;
+	}
+	float *l = jdsp->tmpBuffer[0];
+	float *r = jdsp->tmpBuffer[1];
+	for (unsigned int done = 0; done < len; )
+	{
+		unsigned int piece = len - done;
+		if (piece > jdsp->blockSizeMax)
+			piece = (unsigned int)jdsp->blockSizeMax;
+		jdsp->tmpBuffer[0] = l + done;
+		jdsp->tmpBuffer[1] = r + done;
+		jdsp->processInternal(jdsp, piece);
+		done += piece;
+	}
+	jdsp->tmpBuffer[0] = l;
+	jdsp->tmpBuffer[1] = r;
+}
 void pint16(JamesDSPLib *jdsp, int16_t *x1, int16_t *x2, int16_t *y1, int16_t *y2, size_t n)
 {
 	if (jdsp->blockSizeMax < n)
@@ -672,7 +724,7 @@ void pint16(JamesDSPLib *jdsp, int16_t *x1, int16_t *x2, int16_t *y1, int16_t *y
 	if (jdsp->enableASRC)
 	{
 		unsigned int curDecimatedLen = DoASRC_fwd(jdsp, n);
-		jdsp->processInternal(jdsp, curDecimatedLen);
+		JamesDSPProcessResampled(jdsp, curDecimatedLen);
 		DoASRC_bwd(jdsp, curDecimatedLen, n);
 	}
 	else
@@ -718,7 +770,7 @@ void pint16Multiplexed(JamesDSPLib *jdsp, int16_t *x, int16_t *y, size_t n)
 	if (jdsp->enableASRC)
 	{
 		unsigned int curDecimatedLen = DoASRC_fwd(jdsp, n);
-		jdsp->processInternal(jdsp, curDecimatedLen);
+		JamesDSPProcessResampled(jdsp, curDecimatedLen);
 		DoASRC_bwd(jdsp, curDecimatedLen, n);
 	}
 	else
@@ -757,7 +809,7 @@ void pint32(JamesDSPLib *jdsp, int32_t *x1, int32_t *x2, int32_t *y1, int32_t *y
 	if (jdsp->enableASRC)
 	{
 		unsigned int curDecimatedLen = DoASRC_fwd(jdsp, n);
-		jdsp->processInternal(jdsp, curDecimatedLen);
+		JamesDSPProcessResampled(jdsp, curDecimatedLen);
 		DoASRC_bwd(jdsp, curDecimatedLen, n);
 	}
 	else
@@ -803,7 +855,7 @@ void pint32Multiplexed(JamesDSPLib *jdsp, int32_t *x, int32_t *y, size_t n)
 	if (jdsp->enableASRC)
 	{
 		unsigned int curDecimatedLen = DoASRC_fwd(jdsp, n);
-		jdsp->processInternal(jdsp, curDecimatedLen);
+		JamesDSPProcessResampled(jdsp, curDecimatedLen);
 		DoASRC_bwd(jdsp, curDecimatedLen, n);
 	}
 	else
@@ -851,7 +903,7 @@ void pint8_24(JamesDSPLib *jdsp, int32_t *x1, int32_t *x2, int32_t *y1, int32_t 
 	if (jdsp->enableASRC)
 	{
 		unsigned int curDecimatedLen = DoASRC_fwd(jdsp, n);
-		jdsp->processInternal(jdsp, curDecimatedLen);
+		JamesDSPProcessResampled(jdsp, curDecimatedLen);
 		DoASRC_bwd(jdsp, curDecimatedLen, n);
 	}
 	else
@@ -885,7 +937,7 @@ void pint8_24Multiplexed(JamesDSPLib *jdsp, int32_t *x, int32_t *y, size_t n)
 	if (jdsp->enableASRC)
 	{
 		unsigned int curDecimatedLen = DoASRC_fwd(jdsp, n);
-		jdsp->processInternal(jdsp, curDecimatedLen);
+		JamesDSPProcessResampled(jdsp, curDecimatedLen);
 		DoASRC_bwd(jdsp, curDecimatedLen, n);
 	}
 	else
@@ -917,7 +969,7 @@ void pintp24(JamesDSPLib *jdsp, uint8_t *x1, uint8_t *x2, uint8_t *y1, uint8_t *
 	if (jdsp->enableASRC)
 	{
 		unsigned int curDecimatedLen = DoASRC_fwd(jdsp, n);
-		jdsp->processInternal(jdsp, curDecimatedLen);
+		JamesDSPProcessResampled(jdsp, curDecimatedLen);
 		DoASRC_bwd(jdsp, curDecimatedLen, n);
 	}
 	else
@@ -946,7 +998,7 @@ void pintp24Multiplexed(JamesDSPLib *jdsp, uint8_t *x, uint8_t *y, size_t n)
 	if (jdsp->enableASRC)
 	{
 		unsigned int curDecimatedLen = DoASRC_fwd(jdsp, n);
-		jdsp->processInternal(jdsp, curDecimatedLen);
+		JamesDSPProcessResampled(jdsp, curDecimatedLen);
 		DoASRC_bwd(jdsp, curDecimatedLen, n);
 	}
 	else
@@ -974,7 +1026,7 @@ void pfloat32(JamesDSPLib *jdsp, float *x1, float *x2, float *y1, float *y2, siz
 	if (jdsp->enableASRC)
 	{
 		unsigned int curDecimatedLen = DoASRC_fwd(jdsp, n);
-		jdsp->processInternal(jdsp, curDecimatedLen);
+		JamesDSPProcessResampled(jdsp, curDecimatedLen);
 		DoASRC_bwd(jdsp, curDecimatedLen, n);
 	}
 	else
@@ -1002,7 +1054,7 @@ void pfloat32Multiplexed(JamesDSPLib *jdsp, float *x, float *y, size_t n)
 	if (jdsp->enableASRC)
 	{
 		unsigned int curDecimatedLen = DoASRC_fwd(jdsp, n);
-		jdsp->processInternal(jdsp, curDecimatedLen);
+		JamesDSPProcessResampled(jdsp, curDecimatedLen);
 		DoASRC_bwd(jdsp, curDecimatedLen, n);
 	}
 	else
@@ -1163,17 +1215,9 @@ void JamesDSPInit(JamesDSPLib *jdsp, int n, float sample_rate)
 			jdsp->fs = 48000;
 		InitIntegerASRCHandler(&jdsp->asrc[0], (unsigned long long)jdsp->fs, (unsigned long long)jdsp->trueSampleRate, asrc_taps, isminphase, 0, 0);
 		InitIntegerASRCHandler(&jdsp->asrc[1], (unsigned long long)jdsp->fs, (unsigned long long)jdsp->trueSampleRate, asrc_taps, isminphase, &jdsp->asrc[0].polyphaseDecimator, &jdsp->asrc[0].polyphaseInterpolator);
-		double ratio = (double)jdsp->fs / (double)jdsp->trueSampleRate;
-		unsigned int maxDecimatedLength = (unsigned int)ceil(n * ratio);
-		unsigned int maxInterpolatedLength = (unsigned int)ceil(maxDecimatedLength / ratio);
-		jdsp->pw2BlockMemSize = next_pow_2(maxInterpolatedLength);
-		size_t ctMemBlk = jdsp->blockSizeMax * 2 + maxInterpolatedLength * 2 + jdsp->pw2BlockMemSize * 2;
-		jdsp->tmpBuffer[0] = (float *)malloc(ctMemBlk * sizeof(float));
-		jdsp->tmpBuffer[1] = jdsp->tmpBuffer[0] + jdsp->blockSizeMax;
-		jdsp->tmpBuffer[2] = jdsp->tmpBuffer[1] + jdsp->blockSizeMax;
-		jdsp->tmpBuffer[3] = jdsp->tmpBuffer[2] + maxInterpolatedLength;
-		jdsp->tmpBuffer[4] = jdsp->tmpBuffer[3] + maxInterpolatedLength;
-		jdsp->tmpBuffer[5] = jdsp->tmpBuffer[4] + jdsp->pw2BlockMemSize;
+		size_t workLen = JamesDSPASRCWorkLength(jdsp, jdsp->blockSizeMax);
+		jdsp->tmpBuffer[0] = (float *)malloc((workLen * 4 + jdsp->pw2BlockMemSize * 2) * sizeof(float));
+		JamesDSPASRCAssign(jdsp, workLen);
 	}
 	else
 	{
@@ -1286,19 +1330,11 @@ void JamesDSPSetSampleRate(JamesDSPLib *jdsp, float new_sample_rate, int forceRe
 			jdsp->fs = 48000;
 		InitIntegerASRCHandler(&jdsp->asrc[0], (unsigned long long)jdsp->fs, (unsigned long long)jdsp->trueSampleRate, asrc_taps, isminphase, 0, 0);
 		InitIntegerASRCHandler(&jdsp->asrc[1], (unsigned long long)jdsp->fs, (unsigned long long)jdsp->trueSampleRate, asrc_taps, isminphase, &jdsp->asrc[0].polyphaseDecimator, &jdsp->asrc[0].polyphaseInterpolator);
-		double ratio = (double)jdsp->fs / (double)jdsp->trueSampleRate;
-		unsigned int maxDecimatedLength = (unsigned int)ceil(jdsp->blockSizeMax * ratio);
-		unsigned int maxInterpolatedLength = (unsigned int)ceil(maxDecimatedLength / ratio);
-		jdsp->pw2BlockMemSize = next_pow_2(maxInterpolatedLength);
 		if (jdsp->tmpBuffer[0])
 			free(jdsp->tmpBuffer[0]);
-		size_t ctMemBlk = jdsp->blockSizeMax * 2 + maxInterpolatedLength * 2 + jdsp->pw2BlockMemSize * 2;
-		jdsp->tmpBuffer[0] = (float *)malloc(ctMemBlk * sizeof(float));
-		jdsp->tmpBuffer[1] = jdsp->tmpBuffer[0] + jdsp->blockSizeMax;
-		jdsp->tmpBuffer[2] = jdsp->tmpBuffer[1] + jdsp->blockSizeMax;
-		jdsp->tmpBuffer[3] = jdsp->tmpBuffer[2] + maxInterpolatedLength;
-		jdsp->tmpBuffer[4] = jdsp->tmpBuffer[3] + maxInterpolatedLength;
-		jdsp->tmpBuffer[5] = jdsp->tmpBuffer[4] + jdsp->pw2BlockMemSize;
+		size_t workLen = JamesDSPASRCWorkLength(jdsp, jdsp->blockSizeMax);
+		jdsp->tmpBuffer[0] = (float *)malloc((workLen * 4 + jdsp->pw2BlockMemSize * 2) * sizeof(float));
+		JamesDSPASRCAssign(jdsp, workLen);
 	}
 	else
 	{
