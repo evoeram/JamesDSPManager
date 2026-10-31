@@ -2,9 +2,10 @@
 #include <stdlib.h>
 #include <math.h>
 #include "../jdsp_header.h"
-void StereoEnhancementRefresh(JamesDSPLib *jdsp)
+/* The design on its own, for callers that already hold the lock, such as
+   JamesDSPSetSampleRate: the lock is not recursive. */
+void StereoEnhancementDesign(JamesDSPLib *jdsp)
 {
-  jdsp_lock(jdsp);
 	WarpedPFB *subband0 = (WarpedPFB *)jdsp->sterEnh.subband[0];
 	WarpedPFB *subband1 = (WarpedPFB *)jdsp->sterEnh.subband[1];
 	initWarpedPFB(subband0, jdsp->fs, 5, 2);
@@ -12,6 +13,11 @@ void StereoEnhancementRefresh(JamesDSPLib *jdsp)
 	float ms = 1.2f; // 1.2 ms
 	for (unsigned int i = 0; i < 5; i++)
 		jdsp->sterEnh.emaAlpha[i] = 1.0f - powf(10.0f, (log10f(0.5f) / (ms / 1000.0f) / (jdsp->fs / (float)subband0->Sk[i])));
+}
+void StereoEnhancementRefresh(JamesDSPLib *jdsp)
+{
+  jdsp_lock(jdsp);
+	StereoEnhancementDesign(jdsp);
   jdsp_unlock(jdsp);
 }
 void StereoEnhancementSetParam(JamesDSPLib *jdsp, float mix)

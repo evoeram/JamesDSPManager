@@ -1323,6 +1323,24 @@ void JamesDSPSetSampleRate(JamesDSPLib *jdsp, float new_sample_rate, int forceRe
 		jdsp->equalizerForceRefresh = 1;
 		deferCrossfeed = deferArbEq = deferEqualizer = deferStereo = 1;
 	}
+	/* Outside the forceRefresh guard on purpose: nothing in this app ever
+	   passes forceRefresh, and these three cache every coefficient they use,
+	   so left alone they would go on filtering with the design from the rate
+	   they were last set up for. A DDC file carries one coefficient set per
+	   rate and DDCStringParser returns early when the text is unchanged, so
+	   the DDC never re-picked after a 44.1 / 48 kHz move; the compander keeps
+	   time constants worked out from the old rate; the stereo widening's band
+	   split and envelope times follow the rate too. None of these takes a
+	   lock of its own - it is held here, and it is not recursive. */
+	if (jdsp->vdcFl.oldFile)
+	{
+		jdsp->ddcForceRefresh = 1;
+		DDCEnable(jdsp, jdsp->ddcEnabled);
+	}
+	jdsp->compForceRefresh = 1;
+	CompressorEnable(jdsp, jdsp->compEnabled);
+	jdsp->compForceRefresh = 0;
+	StereoEnhancementDesign(jdsp);
 	jdsp_unlock(jdsp);
 	if (deferCrossfeed)
 		CrossfeedEnable(jdsp, jdsp->crossfeedEnabled);
