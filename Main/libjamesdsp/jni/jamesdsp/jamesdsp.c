@@ -554,6 +554,16 @@ int32_t EffectDSPMainCommand(EffectDSPMain *dspmain, uint32_t cmdCode, uint32_t 
 				*replyData = 0;
 				return 0;
 			}
+			else if (cmd == 1227)
+			{
+				int16_t linearPhase = ((int16_t *)cep)[8];
+				ArbitraryResponseEqualizerSetPhaseMode(&dspmain->jdsp, linearPhase ? 1 : 0);
+#ifdef DEBUG
+				LOGE("Arbitrary response eq linear phase: %d", linearPhase);
+#endif
+				*replyData = 0;
+				return 0;
+			}
 			else if (cmd == 1212)
 			{
 				int16_t viperddcEnabled = ((int16_t *)cep)[8];
