@@ -147,6 +147,38 @@ void biquad_init(biquad_t *bq, peq_filter_type_t type, double dbGain,
 }
 
 /* ================================================================ */
+/* First-order high-pass (odd-order subsonic trailing stage)        */
+/* ================================================================ */
+
+void fohp_configure(fohp_t *f, double cutoffHz, double sampleRate, bool enable)
+{
+    f->active = enable;
+    f->x1 = 0.0;
+    f->y1 = 0.0;
+    f->alpha = 0.0;
+    if (!enable)
+        return;
+    double rc = 1.0 / (2.0 * M_PI * cutoffHz);
+    double dt = 1.0 / sampleRate;
+    f->alpha = rc / (rc + dt);
+}
+
+double fohp_process(fohp_t *f, double sample)
+{
+    double result = f->alpha * (f->y1 + sample - f->x1);
+    f->x1 = sample;
+    f->y1 = result;
+    return result;
+}
+
+void fohp_remove_denormals(fohp_t *f)
+{
+    const double denorm_limit = 2.2250738585072014e-308; /* DBL_MIN */
+    if (fabs(f->x1) < denorm_limit) f->x1 = 0.0;
+    if (fabs(f->y1) < denorm_limit) f->y1 = 0.0;
+}
+
+/* ================================================================ */
 /* PEQ cascade                                                      */
 /* ================================================================ */
 
@@ -332,6 +364,8 @@ void loudness_init(loudness_t *l)
     l->attFactor = 1.0;
     l->neutral = true;
     l->mode = 0;
+    l->activeMode = 0;
+    pthread_mutex_init(&l->cfgLock, NULL);
     /* Default tuning parameters (match Kotlin defaults) */
     l->lsFreq = 75.0;
     l->lsSlope = 0.52;
@@ -341,7 +375,6 @@ void loudness_init(loudness_t *l)
     l->hsRatio = 0.225;
     l->isoBasePhon = 80.0;
     l->isoQ = 4.32;
-    l->lastComputedVolume = 1e30; /* impossible → forces recompute */
     l->coeffsDirty = true;
     /* Default subsonic filter parameters */
     l->subsonicEnabled = false;
@@ -361,35 +394,35 @@ void loudness_init(loudness_t *l)
     }
 }
 
-static void loudness_get_low_shelf_params(loudness_t *l, double volume,
+static void loudness_get_low_shelf_params(const loudness_params_t *p, double volume,
                                           double *freq, double *s,
                                           double *gain, double *preAmp)
 {
-    *freq = l->lsFreq;
-    *s = l->lsSlope;
-    double volDiff = l->referenceLevel - l->referenceOffset - volume;
+    *freq = p->lsFreq;
+    *s = p->lsSlope;
+    double volDiff = p->referenceLevel - p->referenceOffset - volume;
     if (volDiff > 0.0) {
-        *gain = volDiff * l->lsRatio / (1.0 - l->lsRatio) * l->attenuation;
+        *gain = volDiff * p->lsRatio / (1.0 - p->lsRatio) * p->attenuation;
         *preAmp = -*gain;
     } else if (volDiff < 0.0) {
         *preAmp = 0.0;
-        *gain = volDiff * l->lsRatio * exp(volDiff / 90.0) * l->attenuation;
+        *gain = volDiff * p->lsRatio * exp(volDiff / 90.0) * p->attenuation;
     } else {
         *gain = 0.0;
         *preAmp = 0.0;
     }
 }
 
-static void loudness_get_high_shelf_params(loudness_t *l, double volume,
+static void loudness_get_high_shelf_params(const loudness_params_t *p, double volume,
                                            double *freq, double *s, double *gain)
 {
-    *freq = l->hsFreq;
-    *s = l->hsSlope;
-    double volDiff = l->referenceLevel - l->referenceOffset - volume;
+    *freq = p->hsFreq;
+    *s = p->hsSlope;
+    double volDiff = p->referenceLevel - p->referenceOffset - volume;
     if (volDiff > 0.0) {
-        *gain = volDiff * l->hsRatio * exp(-volDiff / 100.0) * l->attenuation;
+        *gain = volDiff * p->hsRatio * exp(-volDiff / 100.0) * p->attenuation;
     } else if (volDiff < 0.0) {
-        *gain = volDiff * l->hsRatio * 0.778 * exp(volDiff / 80.0) * l->attenuation;
+        *gain = volDiff * p->hsRatio * 0.778 * exp(volDiff / 80.0) * p->attenuation;
     } else {
         *gain = 0.0;
     }
@@ -441,11 +474,12 @@ static double iso226_spl_from_phon(double af, double lu, double tf, double lN)
 
 /* Compute ISO 226:2023 loudness correction gains for all 29 bands.
  * Returns the maximum positive gain (for pre-amp calculation). */
-static double loudness_compute_iso226_gains(loudness_t *l, double volume,
+static double loudness_compute_iso226_gains(const loudness_params_t *p,
+                                            double volume,
                                             double gains[ISO226_NUM_BANDS])
 {
-    double basePhon = l->isoBasePhon;
-    double volDiff = l->referenceLevel - l->referenceOffset - volume;
+    double basePhon = p->isoBasePhon;
+    double volDiff = p->referenceLevel - p->referenceOffset - volume;
     double refPhon = basePhon;
     double curPhon = basePhon - volDiff;
 
@@ -474,7 +508,8 @@ static double loudness_compute_iso226_gains(loudness_t *l, double volume,
  * Evaluates the combined response of all 29 peaking biquads at fine
  * frequency resolution and returns the maximum gain in dB.
  * This accounts for filter overlap between adjacent bands. */
-static double loudness_compute_cascade_peak(loudness_t *l)
+static double loudness_compute_cascade_peak(loudness_t *l,
+                                            const loudness_params_t *p)
 {
     double peak = 0.0;
     int i;
@@ -488,16 +523,16 @@ static double loudness_compute_cascade_peak(loudness_t *l)
         int j;
         for (j = 0; j < ISO226_NUM_BANDS; j++)
         {
-            double gain = l->isoGains[j] * l->attenuation;
+            double gain = l->isoGains[j] * p->attenuation;
             if (fabs(gain) < 0.05)
                 continue;
             /* Evaluate peaking biquad magnitude at frequency f */
-            double w  = 2.0 * M_PI * f / l->sampleRate;
-            double w0 = 2.0 * M_PI * iso226Freqs[j] / l->sampleRate;
-            if (iso226Freqs[j] > l->sampleRate * 0.5 * 0.98)
+            double w  = 2.0 * M_PI * f / p->sampleRate;
+            double w0 = 2.0 * M_PI * iso226Freqs[j] / p->sampleRate;
+            if (iso226Freqs[j] > p->sampleRate * 0.5 * 0.98)
                 continue; /* above nyquist, no contribution */
             double A = pow(10.0, gain / 40.0);
-            double alpha = sin(w0) / (2.0 * l->isoQ);
+            double alpha = sin(w0) / (2.0 * p->isoQ);
             double b0 = 1.0 + alpha * A;
             double b1 = -2.0 * cos(w0);
             double b2 = 1.0 - alpha * A;
@@ -530,15 +565,15 @@ static double loudness_compute_cascade_peak(loudness_t *l)
             total = 0.0;
             for (j = 0; j < ISO226_NUM_BANDS; j++)
             {
-                double gain = l->isoGains[j] * l->attenuation;
+                double gain = l->isoGains[j] * p->attenuation;
                 if (fabs(gain) < 0.05)
                     continue;
-                double w  = 2.0 * M_PI * fMid / l->sampleRate;
-                double w0 = 2.0 * M_PI * iso226Freqs[j] / l->sampleRate;
-                if (iso226Freqs[j] > l->sampleRate * 0.5 * 0.98)
+                double w  = 2.0 * M_PI * fMid / p->sampleRate;
+                double w0 = 2.0 * M_PI * iso226Freqs[j] / p->sampleRate;
+                if (iso226Freqs[j] > p->sampleRate * 0.5 * 0.98)
                     continue;
                 double A = pow(10.0, gain / 40.0);
-                double alpha = sin(w0) / (2.0 * l->isoQ);
+                double alpha = sin(w0) / (2.0 * p->isoQ);
                 double b0 = 1.0 + alpha * A;
                 double b1 = -2.0 * cos(w0);
                 double b2 = 1.0 - alpha * A;
@@ -570,7 +605,7 @@ static double loudness_compute_cascade_peak(loudness_t *l)
     double maxIndiv = 0.0;
     for (i = 0; i < ISO226_NUM_BANDS; i++)
     {
-        double gain = l->isoGains[i] * l->attenuation;
+        double gain = l->isoGains[i] * p->attenuation;
         if (gain > maxIndiv)
             maxIndiv = gain;
     }
@@ -580,29 +615,33 @@ static double loudness_compute_cascade_peak(loudness_t *l)
     return peak;
 }
 
-static void loudness_recompute(loudness_t *l, double volume)
+static void loudness_recompute(loudness_t *l, double volume,
+                               const loudness_params_t *p)
 {
-    if (l->mode == 1) {
+    /* Publish the mode mirror for the per-sample hot path (audio-thread only) */
+    l->activeMode = p->mode;
+
+    if (p->mode == 1) {
         /* ---- ISO 226:2023 mode ---- */
-        double maxGain = loudness_compute_iso226_gains(l, volume, l->isoGains);
+        double maxGain = loudness_compute_iso226_gains(p, volume, l->isoGains);
 
         /* Check if correction is near-zero (bypass for best quality) */
         double maxAbs = 0.0;
         int i;
         for (i = 0; i < ISO226_NUM_BANDS; i++) {
-            double absGain = fabs(l->isoGains[i] * l->attenuation);
+            double absGain = fabs(l->isoGains[i] * p->attenuation);
             if (absGain > maxAbs)
                 maxAbs = absGain;
         }
         l->neutral = (maxAbs < 0.2);
 
         /* Build peaking biquads for each band */
-        double qThirdOctave = l->isoQ;
-        double nyquist = l->sampleRate * 0.5;
+        double qThirdOctave = p->isoQ;
+        double nyquist = p->sampleRate * 0.5;
 
         l->isoActiveBandCount = 0;
         for (i = 0; i < ISO226_NUM_BANDS; i++) {
-            double gain = l->isoGains[i] * l->attenuation;
+            double gain = l->isoGains[i] * p->attenuation;
             if (fabs(gain) < 0.05) {
                 /* Skip near-zero bands — set passthrough (b0=1) */
                 biquad_reset(&l->isoBandsL[i]);
@@ -619,9 +658,9 @@ static void loudness_recompute(loudness_t *l, double volume)
             if (freq > nyquist * 0.98) freq = nyquist * 0.98;
 
             biquad_init(&l->isoBandsL[i], PEQ_TYPE_PEAKING, gain, freq,
-                        l->sampleRate, qThirdOctave, false);
+                        p->sampleRate, qThirdOctave, false);
             biquad_init(&l->isoBandsR[i], PEQ_TYPE_PEAKING, gain, freq,
-                        l->sampleRate, qThirdOctave, false);
+                        p->sampleRate, qThirdOctave, false);
             l->isoActiveBandCount++;
         }
 
@@ -631,7 +670,7 @@ static void loudness_recompute(loudness_t *l, double volume)
          * response at fine frequency resolution to find the true peak. */
         double cascadePeak = 0.0;
         if (l->isoActiveBandCount > 0) {
-            cascadePeak = loudness_compute_cascade_peak(l);
+            cascadePeak = loudness_compute_cascade_peak(l, p);
         }
         double preAmpDb = -cascadePeak;
         l->attFactor = exp(preAmpDb / 6.0 * log(2.0));
@@ -645,36 +684,39 @@ static void loudness_recompute(loudness_t *l, double volume)
     double freqLS, sLS, gainLS, preAmp;
     double freqHS, sHS, gainHS;
 
-    loudness_get_low_shelf_params(l, volume, &freqLS, &sLS, &gainLS, &preAmp);
+    loudness_get_low_shelf_params(p, volume, &freqLS, &sLS, &gainLS, &preAmp);
     l->attFactor = exp(preAmp / 6.0 * log(2.0));
 
-    loudness_get_high_shelf_params(l, volume + preAmp, &freqHS, &sHS, &gainHS);
+    loudness_get_high_shelf_params(p, volume + preAmp, &freqHS, &sHS, &gainHS);
 
     double absGainLS = fabs(gainLS);
     double absGainHS = fabs(gainHS);
     l->neutral = (absGainLS < 0.2 && absGainHS < 0.2);
 
     /* S-slope shelf mode (isBandwidthOrS = true) */
-    biquad_init(&l->lowShelfL,  PEQ_TYPE_LOW_SHELF,  gainLS, freqLS, l->sampleRate, sLS, true);
-    biquad_init(&l->lowShelfR,  PEQ_TYPE_LOW_SHELF,  gainLS, freqLS, l->sampleRate, sLS, true);
-    biquad_init(&l->highShelfL, PEQ_TYPE_HIGH_SHELF, gainHS, freqHS, l->sampleRate, sHS, true);
-    biquad_init(&l->highShelfR, PEQ_TYPE_HIGH_SHELF, gainHS, freqHS, l->sampleRate, sHS, true);
+    biquad_init(&l->lowShelfL,  PEQ_TYPE_LOW_SHELF,  gainLS, freqLS, p->sampleRate, sLS, true);
+    biquad_init(&l->lowShelfR,  PEQ_TYPE_LOW_SHELF,  gainLS, freqLS, p->sampleRate, sLS, true);
+    biquad_init(&l->highShelfL, PEQ_TYPE_HIGH_SHELF, gainHS, freqHS, p->sampleRate, sHS, true);
+    biquad_init(&l->highShelfR, PEQ_TYPE_HIGH_SHELF, gainHS, freqHS, p->sampleRate, sHS, true);
     }
 
     /* ---- Subsonic (infrasonic) high-pass filter ---- */
-    /* Rebuild regardless of mode; applied before loudness correction. */
-    if (l->subsonicEnabled) {
-        double nyquist = l->sampleRate * 0.5;
-        double f = l->subsonicFreq;
+    /* Rebuild regardless of mode; applied before loudness correction.
+     * Spec: floor(order/2) 2nd-order biquads + one first-order stage for
+     * odd orders (each order = 6 dB/oct), identical to the C++ wrapper
+     * and the Kotlin UI curve. */
+    if (p->subsonicEnabled) {
+        double nyquist = p->sampleRate * 0.5;
+        double f = p->subsonicFreq;
         if (f < 1.0) f = 1.0;
         if (f > nyquist * 0.98) f = nyquist * 0.98;
-        int numStages = (l->subsonicOrder + 1) / 2;
+        int numStages = p->subsonicOrder / 2;
         int i;
         for (i = 0; i < numStages && i < MAX_SUBSONIC_STAGES; i++) {
             biquad_init(&l->subsonicL[i], PEQ_TYPE_HIGH_PASS, 0.0, f,
-                        l->sampleRate, l->subsonicQ, false);
+                        p->sampleRate, p->subsonicQ, false);
             biquad_init(&l->subsonicR[i], PEQ_TYPE_HIGH_PASS, 0.0, f,
-                        l->sampleRate, l->subsonicQ, false);
+                        p->sampleRate, p->subsonicQ, false);
         }
         for (; i < MAX_SUBSONIC_STAGES; i++) {
             biquad_reset(&l->subsonicL[i]);
@@ -685,6 +727,13 @@ static void loudness_recompute(loudness_t *l, double volume)
             l->subsonicR[i].b0 = 1.0; l->subsonicR[i].b1 = 0; l->subsonicR[i].b2 = 0;
             l->subsonicR[i].a1 = 0; l->subsonicR[i].a2 = 0;
         }
+        fohp_configure(&l->subsonicFirstL, f, p->sampleRate,
+                       (p->subsonicOrder % 2) != 0);
+        fohp_configure(&l->subsonicFirstR, f, p->sampleRate,
+                       (p->subsonicOrder % 2) != 0);
+    } else {
+        fohp_configure(&l->subsonicFirstL, 20.0, p->sampleRate, false);
+        fohp_configure(&l->subsonicFirstR, 20.0, p->sampleRate, false);
     }
 }
 
@@ -696,25 +745,14 @@ void loudness_configure(loudness_t *l, double sampleRate,
     l->referenceLevel = refLevel;
     l->referenceOffset = refOffset;
     l->attenuation = (attenuation < 0.0) ? 0.0 : (attenuation > 2.0 ? 2.0 : attenuation);
+    pthread_mutex_lock(&l->cfgLock);
     l->volumeDb = volumeDb;
     l->mode = mode;
-    l->lastComputedVolume = 1e30; /* force recompute */
     l->coeffsDirty = true;
-    l->attFactor = 1.0;
-    l->neutral = true;
-    /* Reset ISO 226 state */
-    l->isoPreampLinear = 1.0;
-    l->isoActiveBandCount = 0;
-    for (int i = 0; i < ISO226_NUM_BANDS; i++) {
-        l->isoGains[i] = 0.0;
-        biquad_reset(&l->isoBandsL[i]);
-        biquad_reset(&l->isoBandsR[i]);
-        /* Set passthrough (b0=1) so unconfigured bands don't silence audio */
-        l->isoBandsL[i].b0 = 1.0; l->isoBandsL[i].b1 = 0; l->isoBandsL[i].b2 = 0;
-        l->isoBandsL[i].a1 = 0; l->isoBandsL[i].a2 = 0;
-        l->isoBandsR[i].b0 = 1.0; l->isoBandsR[i].b1 = 0; l->isoBandsR[i].b2 = 0;
-        l->isoBandsR[i].a1 = 0; l->isoBandsR[i].a2 = 0;
-    }
+    pthread_mutex_unlock(&l->cfgLock);
+    /* BUG-06: biquads are intentionally NOT reset here. The audio thread
+     * rebuilds every coefficient on the next block via the dirty flag, so
+     * the control thread never touches filter state. */
 }
 
 void loudness_set_tuning(loudness_t *l,
@@ -728,50 +766,92 @@ void loudness_set_tuning(loudness_t *l,
     l->hsFreq = hsFreq;
     l->hsSlope = hsSlope;
     l->hsRatio = hsRatio;
+    pthread_mutex_lock(&l->cfgLock);
     l->isoBasePhon = isoBasePhon;
     l->isoQ = isoQ;
     l->coeffsDirty = true;
+    pthread_mutex_unlock(&l->cfgLock);
 }
 
 void loudness_set_subsonic(loudness_t *l, bool enable, double freq,
                            int order, double qFactor)
 {
+    pthread_mutex_lock(&l->cfgLock);
     l->subsonicEnabled = enable;
     l->subsonicFreq = (freq < 5.0) ? 5.0 : (freq > 200.0 ? 200.0 : freq);
     l->subsonicOrder = (order < 1) ? 1 : (order > 8 ? 8 : order);
     l->subsonicQ = (qFactor < 0.1) ? 0.1 : (qFactor > 2.0 ? 2.0 : qFactor);
     l->coeffsDirty = true;
+    pthread_mutex_unlock(&l->cfgLock);
 }
 
 void loudness_set_volume(loudness_t *l, double volumeDb)
 {
+    pthread_mutex_lock(&l->cfgLock);
     l->volumeDb = volumeDb;
     l->coeffsDirty = true;
+    pthread_mutex_unlock(&l->cfgLock);
 }
 
 void loudness_set_enabled(loudness_t *l, bool enabled)
 {
+    pthread_mutex_lock(&l->cfgLock);
     l->enabled = enabled;
+    pthread_mutex_unlock(&l->cfgLock);
+}
+
+bool loudness_is_enabled(loudness_t *l)
+{
+    bool en;
+    pthread_mutex_lock(&l->cfgLock);
+    en = l->enabled;
+    pthread_mutex_unlock(&l->cfgLock);
+    return en;
 }
 
 void loudness_process_interleaved(loudness_t *l, float *data, size_t numFrames)
 {
-    if (!l->enabled)
+    /* BUG-06: copy the parameter block under cfgLock so setters on the
+     * control thread can never tear a coefficient rebuild. */
+    loudness_params_t p;
+    bool en, dirty;
+    pthread_mutex_lock(&l->cfgLock);
+    p.sampleRate      = l->sampleRate;
+    p.referenceLevel  = l->referenceLevel;
+    p.referenceOffset = l->referenceOffset;
+    p.attenuation     = l->attenuation;
+    p.volumeDb        = l->volumeDb;
+    p.mode            = l->mode;
+    p.lsFreq = l->lsFreq; p.lsSlope = l->lsSlope; p.lsRatio = l->lsRatio;
+    p.hsFreq = l->hsFreq; p.hsSlope = l->hsSlope; p.hsRatio = l->hsRatio;
+    p.isoBasePhon = l->isoBasePhon; p.isoQ = l->isoQ;
+    p.subsonicEnabled = l->subsonicEnabled;
+    p.subsonicFreq    = l->subsonicFreq;
+    p.subsonicOrder   = l->subsonicOrder;
+    p.subsonicQ       = l->subsonicQ;
+    en    = l->enabled;
+    dirty = l->coeffsDirty;
+    pthread_mutex_unlock(&l->cfgLock);
+
+    if (!en)
         return;
 
     /* Lazily recompute coefficients if volume or parameters changed */
-    if (l->coeffsDirty) {
-        loudness_recompute(l, l->volumeDb);
-        l->lastComputedVolume = l->volumeDb;
+    if (dirty) {
+        loudness_recompute(l, p.volumeDb, &p);
+        pthread_mutex_lock(&l->cfgLock);
         l->coeffsDirty = false;
+        pthread_mutex_unlock(&l->cfgLock);
     }
 
-    /* Determine subsonic stages */
+    /* Determine subsonic stages: floor(order/2) biquads plus a first-order
+     * stage for odd orders (from the locked parameter snapshot) */
     int numSubsonicStages = 0;
-    if (l->subsonicEnabled)
-        numSubsonicStages = (l->subsonicOrder + 1) / 2;
+    if (p.subsonicEnabled)
+        numSubsonicStages = p.subsonicOrder / 2;
+    bool subsonicFirstOrder = p.subsonicEnabled && (p.subsonicOrder % 2) != 0;
 
-    if (l->neutral && numSubsonicStages == 0)
+    if (l->neutral && numSubsonicStages == 0 && !subsonicFirstOrder)
         return;
 
     /* If only subsonic is active (neutral loudness) */
@@ -779,6 +859,10 @@ void loudness_process_interleaved(loudness_t *l, float *data, size_t numFrames)
         for (size_t i = 0; i < numFrames; i++) {
             double sL = data[i * 2];
             double sR = data[i * 2 + 1];
+            if (subsonicFirstOrder) {
+                sL = fohp_process(&l->subsonicFirstL, sL);
+                sR = fohp_process(&l->subsonicFirstR, sR);
+            }
             for (int s = 0; s < numSubsonicStages && s < MAX_SUBSONIC_STAGES; s++) {
                 sL = biquad_process(&l->subsonicL[s], sL);
                 sR = biquad_process(&l->subsonicR[s], sR);
@@ -786,6 +870,8 @@ void loudness_process_interleaved(loudness_t *l, float *data, size_t numFrames)
             data[i * 2]     = (float)sL;
             data[i * 2 + 1] = (float)sR;
         }
+        fohp_remove_denormals(&l->subsonicFirstL);
+        fohp_remove_denormals(&l->subsonicFirstR);
         for (int s = 0; s < numSubsonicStages && s < MAX_SUBSONIC_STAGES; s++) {
             biquad_remove_denormals(&l->subsonicL[s]);
             biquad_remove_denormals(&l->subsonicR[s]);
@@ -793,7 +879,7 @@ void loudness_process_interleaved(loudness_t *l, float *data, size_t numFrames)
         return;
     }
 
-    if (l->mode == 1) {
+    if (l->activeMode == 1) {
         /* ISO 226:2023 mode — 29-band peaking EQ cascade with pre-amp */
         if (l->isoActiveBandCount == 0)
             return;
@@ -804,6 +890,10 @@ void loudness_process_interleaved(loudness_t *l, float *data, size_t numFrames)
             double sampleR = data[i * 2 + 1];
 
             /* Subsonic HP filter before loudness correction */
+            if (subsonicFirstOrder) {
+                sampleL = fohp_process(&l->subsonicFirstL, sampleL);
+                sampleR = fohp_process(&l->subsonicFirstR, sampleR);
+            }
             for (int s = 0; s < numSubsonicStages && s < MAX_SUBSONIC_STAGES; s++) {
                 sampleL = biquad_process(&l->subsonicL[s], sampleL);
                 sampleR = biquad_process(&l->subsonicR[s], sampleR);
@@ -822,6 +912,8 @@ void loudness_process_interleaved(loudness_t *l, float *data, size_t numFrames)
         }
 
         /* Remove denormals */
+        fohp_remove_denormals(&l->subsonicFirstL);
+        fohp_remove_denormals(&l->subsonicFirstR);
         for (int b = 0; b < ISO226_NUM_BANDS; b++) {
             biquad_remove_denormals(&l->isoBandsL[b]);
             biquad_remove_denormals(&l->isoBandsR[b]);
@@ -839,6 +931,10 @@ void loudness_process_interleaved(loudness_t *l, float *data, size_t numFrames)
         double sampleR = data[i * 2 + 1];
 
         /* Subsonic HP filter before loudness correction */
+        if (subsonicFirstOrder) {
+            sampleL = fohp_process(&l->subsonicFirstL, sampleL);
+            sampleR = fohp_process(&l->subsonicFirstR, sampleR);
+        }
         for (int s = 0; s < numSubsonicStages && s < MAX_SUBSONIC_STAGES; s++) {
             sampleL = biquad_process(&l->subsonicL[s], sampleL);
             sampleR = biquad_process(&l->subsonicR[s], sampleR);
@@ -859,6 +955,8 @@ void loudness_process_interleaved(loudness_t *l, float *data, size_t numFrames)
     }
 
     /* Remove denormals */
+    fohp_remove_denormals(&l->subsonicFirstL);
+    fohp_remove_denormals(&l->subsonicFirstR);
     biquad_remove_denormals(&l->lowShelfL);
     biquad_remove_denormals(&l->lowShelfR);
     biquad_remove_denormals(&l->highShelfL);

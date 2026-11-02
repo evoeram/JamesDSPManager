@@ -213,10 +213,12 @@ int32_t EffectDSPMainCommand(EffectDSPMain *dspmain, uint32_t cmdCode, uint32_t 
 			 * и вызовет syncWithPreferences, который переотправит параметры
 			 * с корректным sample rate. Здесь мы только обновляем sampleRate
 			 * в структурах, чтобы новый fs использовался при следующем configure. */
+			/* BUG-06: пишем под cfgLock — audio thread копирует
+			 * параметры под тем же локом перед пересчётом. */
+			pthread_mutex_lock(&dspmain->loudness.cfgLock);
 			dspmain->loudness.sampleRate = newFs;
-			/* Помечаем loudness для перерасчёта коэффициентов */
 			dspmain->loudness.coeffsDirty = true;
-			dspmain->loudness.lastComputedVolume = 1e30;
+			pthread_mutex_unlock(&dspmain->loudness.cfgLock);
 			/* Dynamic EQ: параметры полос сохраняются, коэффициенты
 			 * пересчитываются под новую fs, состояние фильтров сбрасывается. */
 			dynamicEq_refresh(&dspmain->dynamicEq, newFs);
@@ -1350,7 +1352,7 @@ int32_t EffectDSPMainProcess(EffectDSPMain *dspmain, audio_buffer_t *in, audio_b
 	 * program loudness. Tape is called even after disable so its fade-out
 	 * can finish; it bypasses itself once drained. */
 	if (dspmain->peq.enabled || dynamicEq_is_active(&dspmain->dynamicEq) ||
-		dspmain->loudness.enabled || dspmain->lufs.enabled ||
+		loudness_is_enabled(&dspmain->loudness) || dspmain->lufs.enabled ||
 		dspmain->fetComp.enabled || dspmain->viperClarity.enabled ||
 		dspmain->fieldSurround.enabled || dspmain->agc.enabled ||
 		dspmain->cure.enabled || tape_is_active(&dspmain->tape))

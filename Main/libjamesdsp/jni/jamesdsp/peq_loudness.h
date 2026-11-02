@@ -65,6 +65,22 @@ void biquad_init(biquad_t *bq, peq_filter_type_t type, double dbGain,
                  double freq, double srate, double bandwidthOrQOrS,
                  bool isBandwidthOrS);
 
+/* First-order RC high-pass (6 dB/oct) used as the trailing stage of an
+ * odd-order subsonic cascade. Same spec as FirstOrderHighPass in the C++
+ * LoudnessCorrectionProcessor and the Kotlin LoudnessCurveCalculator:
+ * y[n] = alpha * (y[n-1] + x[n] - x[n-1]), alpha = rc/(rc+dt),
+ * rc = 1/(2*pi*fc), dt = 1/sampleRate. Runs FIRST in the cascade.
+ * Zero-initialized (memset) means inactive. */
+typedef struct {
+    double alpha;
+    double x1, y1;
+    bool active;
+} fohp_t;
+
+void fohp_configure(fohp_t *f, double cutoffHz, double sampleRate, bool enable);
+double fohp_process(fohp_t *f, double sample);
+void fohp_remove_denormals(fohp_t *f);
+
 /* Process a single sample through the biquad */
 static inline double biquad_process(biquad_t *bq, double sample)
 {
@@ -131,17 +147,43 @@ void peq_cascade_process_interleaved(peq_cascade_t *peq, float *data, size_t num
 
 /* ---- Loudness correction ---- */
 
+/* BUG-06: parameter snapshot. Setters (control thread) write the parameter
+ * fields of loudness_t under cfgLock and set coeffsDirty; the audio thread
+ * copies them into a local loudness_params_t under the same short lock
+ * before recomputing coefficients. Biquad state is touched only by the
+ * audio thread (lazy recompute + per-sample processing), so a setter can
+ * never corrupt filter state or tear a coefficient rebuild. */
 typedef struct {
-    /* Parameters */
     double sampleRate;
     double referenceLevel;
     double referenceOffset;
     double attenuation;
     double volumeDb;
-    double lastComputedVolume;
+    int mode; /* 0 = classic (Fletcher-Munson), 1 = ISO 226:2023 */
+    double lsFreq, lsSlope, lsRatio;
+    double hsFreq, hsSlope, hsRatio;
+    double isoBasePhon, isoQ;
+    bool subsonicEnabled;
+    double subsonicFreq;
+    int subsonicOrder;
+    double subsonicQ;
+} loudness_params_t;
+
+typedef struct {
+    /* Parameters — written by setters under cfgLock; the audio thread reads
+     * them only via a locked copy into loudness_params_t (see .c) */
+    double sampleRate;
+    double referenceLevel;
+    double referenceOffset;
+    double attenuation;
+    double volumeDb;
     bool coeffsDirty;
     bool enabled;
+    pthread_mutex_t cfgLock;
     int mode; /* 0 = classic (Fletcher-Munson), 1 = ISO 226:2023 */
+    /* Mirror of mode, published by loudness_recompute() on the audio thread
+     * and read by the per-sample hot path */
+    int activeMode;
     /* Tuning parameters (set via cmd 1303) */
     double lsFreq, lsSlope, lsRatio;
     double hsFreq, hsSlope, hsRatio;
@@ -154,6 +196,8 @@ typedef struct {
 #define MAX_SUBSONIC_STAGES 4
     biquad_t subsonicL[MAX_SUBSONIC_STAGES];
     biquad_t subsonicR[MAX_SUBSONIC_STAGES];
+    fohp_t subsonicFirstL;  /* odd-order first-order stage (runs first) */
+    fohp_t subsonicFirstR;
     /* Internal */
     double attFactor;
     bool neutral;
@@ -180,6 +224,8 @@ void loudness_set_subsonic(loudness_t *l, bool enable, double freq,
                            int order, double qFactor);
 void loudness_set_volume(loudness_t *l, double volumeDb);
 void loudness_set_enabled(loudness_t *l, bool enabled);
+/* Thread-safe read of the enabled flag (locks cfgLock). */
+bool loudness_is_enabled(loudness_t *l);
 void loudness_process_interleaved(loudness_t *l, float *data, size_t numFrames);
 
 #ifdef __cplusplus
